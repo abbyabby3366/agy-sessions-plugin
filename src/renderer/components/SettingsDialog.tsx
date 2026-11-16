@@ -111,8 +111,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
 
         <label className="setting-row" htmlFor="setting-recent-idle">
           <div>
-            <span className="setting-label">Show Recently Finished</span>
-            <span className="setting-hint">Completed in last 30 min</span>
+            <span className="setting-label">Show Last 10 Idle Runs</span>
+            <span className="setting-hint">Includes total time elapsed</span>
           </div>
           <input
             id="setting-recent-idle"

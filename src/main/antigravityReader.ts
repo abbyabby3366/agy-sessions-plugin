@@ -43,7 +43,7 @@ interface CachedTranscriptState {
 }
 
 const STALL_THRESHOLD_MS = 10 * 60 * 1000;
-const RECENT_IDLE_WINDOW_MS = 30 * 60 * 1000;
+const MAX_RECENT_IDLE = 10;
 const HEAD_READ_BYTES = 4096;
 const TAIL_READ_BYTES = 32768;
 const MAX_CACHE_ENTRIES = 250;
@@ -372,12 +372,13 @@ function readSource(
            last_user_input_time
          FROM conversation_summaries
          WHERE killed = 0
+           AND nesting_depth = 0
            AND status != 'CASCADE_RUN_STATUS_RUNNING'
            AND not_fully_idle = 0
          ORDER BY last_modified_time DESC
-         LIMIT 40`
+         LIMIT ?`
       )
-      .all() as unknown as RawSummaryRow[];
+      .all(MAX_RECENT_IDLE) as unknown as RawSummaryRow[];
 
     const seenIds = new Set<string>();
     const rows: RawSummaryRow[] = [];
@@ -394,11 +395,6 @@ function readSource(
 
     for (const row of rows) {
       const lastModifiedMs = parseTimestampMs(row.last_modified_time);
-      const isRunningRow = row.status === 'CASCADE_RUN_STATUS_RUNNING' || row.not_fully_idle === 1;
-
-      if (!isRunningRow && lastModifiedMs !== null && nowMs - lastModifiedMs > RECENT_IDLE_WINDOW_MS) {
-        continue;
-      }
 
       const transcriptCandidate = path.join(
         dirPath,
@@ -465,6 +461,10 @@ function readSource(
         lastStepType: tail?.lastStepType ?? null,
         lastStepStatus: tail?.lastStepStatus ?? null,
         lastToolName: tail?.lastToolName ?? null,
+        waitingSinceAt:
+          phase === 'waiting_input'
+            ? (tail?.lastStepAt ? toIsoOrNull(tail.lastStepAt) : effectiveModifiedIso)
+            : null,
         transcriptPath: transcriptExists ? transcriptCandidate : null,
         activeSubagents: [],
       };
@@ -501,6 +501,7 @@ function readSource(
             lastStepType: null,
             lastStepStatus: null,
             lastToolName: null,
+            waitingSinceAt: child.phase === 'waiting_input' ? child.lastModifiedAt : null,
             transcriptPath: null,
             activeSubagents: [],
           });
@@ -512,7 +513,7 @@ function readSource(
     const running = all.filter((item) => item.phase !== 'idle');
     const recentIdle = all
       .filter((item) => item.phase === 'idle')
-      .slice(0, 6);
+      .slice(0, MAX_RECENT_IDLE);
 
     return {
       running,
@@ -563,7 +564,7 @@ export function readMonitorSnapshot(options: ReaderOptions = {}): MonitorSnapsho
   return {
     capturedAt: new Date(nowMs).toISOString(),
     running,
-    recentIdle: recentIdle.slice(0, 8),
+    recentIdle: recentIdle.slice(0, MAX_RECENT_IDLE),
     sources,
   };
 }

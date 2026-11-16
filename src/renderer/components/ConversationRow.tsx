@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { getQuestionWaitMs, isQuestionOverdue } from '../../shared/status.js';
 import {
   formatDateTimeGMT8,
   formatElapsed,
@@ -71,6 +72,7 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
 
   const turnStartMs = parseTimestampMs(item.lastUserInputAt);
   const lastModMs = parseTimestampMs(item.lastModifiedAt);
+  const chatStartMs = parseTimestampMs(item.startedAt);
 
   let elapsedText = '--:--';
   let elapsedMs = 0;
@@ -85,10 +87,32 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
     elapsedText = formatElapsed(elapsedMs);
   }
 
+  let totalElapsedText: string | null = null;
+  let totalElapsedMs: number | null = null;
+  if (chatStartMs !== null) {
+    if (item.phase === 'idle') {
+      if (lastModMs !== null && lastModMs >= chatStartMs) {
+        totalElapsedMs = lastModMs - chatStartMs;
+      }
+    } else {
+      totalElapsedMs = Math.max(0, nowMs - chatStartMs);
+    }
+  } else if (item.phase === 'idle' && turnStartMs !== null && lastModMs !== null && lastModMs >= turnStartMs) {
+    totalElapsedMs = lastModMs - turnStartMs;
+  } else if (item.phase !== 'idle' && turnStartMs !== null) {
+    totalElapsedMs = Math.max(0, nowMs - turnStartMs);
+  }
+
+  if (totalElapsedMs !== null) {
+    totalElapsedText = formatElapsed(totalElapsedMs);
+  }
+
   const workspaceLabel =
     item.workspaceName ?? (item.nestingDepth > 0 ? 'Subagent' : 'No Workspace');
   const stepSummary = formatStepSummary(item);
   const isLongRun = item.phase === 'running' && elapsedMs >= LONG_RUN_THRESHOLD_MS;
+  const waitMs = getQuestionWaitMs(item, nowMs);
+  const overdueQuestion = isQuestionOverdue(item, nowMs);
 
   const handleCopy = async () => {
     await onCopyId(item.conversationId);
@@ -97,7 +121,12 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
   };
 
   return (
-    <li className="conv-item" data-expanded={expanded}>
+    <li
+      className="conv-item"
+      data-expanded={expanded}
+      data-phase={item.phase}
+      data-overdue={overdueQuestion}
+    >
       <button
         type="button"
         className="conv-trigger"
@@ -106,14 +135,27 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
       >
         <div className="conv-top-row">
           <div className="conv-workspace-wrap">
-            <span className="status-indicator" data-phase={item.phase}>
+            <span
+              className="status-indicator"
+              data-phase={item.phase}
+              data-overdue={overdueQuestion}
+            >
               <StatusGlyph phase={item.phase} />
             </span>
             <span className="workspace-name">{workspaceLabel}</span>
             {item.source === 'cli' && <span className="source-tag">CLI</span>}
             {!compact && (
-              <span className="phase-tag" data-phase={item.phase}>
-                {PHASE_LABEL[item.phase]}
+              <span
+                className="phase-tag"
+                data-phase={item.phase}
+                data-overdue={overdueQuestion}
+              >
+                {overdueQuestion ? 'No Reply >5m' : PHASE_LABEL[item.phase]}
+              </span>
+            )}
+            {compact && overdueQuestion && (
+              <span className="phase-tag compact-overdue" data-phase="waiting_input" data-overdue="true">
+                5m+
               </span>
             )}
             {compact && item.title && (
@@ -121,14 +163,25 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
             )}
           </div>
 
-          <span
-            className="elapsed-timer"
-            data-phase={item.phase}
-            data-long={isLongRun}
-            aria-label={`Elapsed time ${elapsedText}`}
-          >
-            {elapsedText}
-          </span>
+          <div className="timer-stack">
+            <span
+              className="elapsed-timer"
+              data-phase={item.phase}
+              data-overdue={overdueQuestion}
+              data-long={isLongRun}
+              aria-label={`Turn elapsed ${elapsedText}`}
+            >
+              {elapsedText}
+            </span>
+            {totalElapsedText !== null && (
+              <span
+                className="total-elapsed-sub"
+                aria-label={`Total elapsed ${totalElapsedText}`}
+              >
+                {compact ? `Σ ${totalElapsedText}` : `Total ${totalElapsedText}`}
+              </span>
+            )}
+          </div>
         </div>
 
         {!compact && (
@@ -151,6 +204,32 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
                   <code>{item.conversationId}</code>
                 </td>
               </tr>
+              <tr>
+                <th scope="row">Turn Elapsed</th>
+                <td>
+                  <code className="elapsed-inline">{elapsedText}</code>
+                </td>
+              </tr>
+              <tr>
+                <th scope="row">Total Elapsed</th>
+                <td>
+                  <code className="elapsed-inline">{totalElapsedText ?? '--:--'}</code>
+                </td>
+              </tr>
+              {waitMs !== null && (
+                <tr>
+                  <th scope="row">Waiting Reply</th>
+                  <td>
+                    <code
+                      className="elapsed-inline"
+                      data-overdue={overdueQuestion}
+                    >
+                      {formatElapsed(waitMs)}
+                      {overdueQuestion ? ' (>5m overdue)' : ''}
+                    </code>
+                  </td>
+                </tr>
+              )}
               <tr>
                 <th scope="row">Turn Started</th>
                 <td>

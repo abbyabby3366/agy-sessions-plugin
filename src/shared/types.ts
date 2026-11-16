@@ -6,6 +6,8 @@ export type ActivityPhase =
   | 'stalled'
   | 'idle';
 
+export type SortMode = 'duration' | 'action_needed' | 'activity';
+
 export interface SubagentSummary {
   conversationId: string;
   title: string | null;
@@ -34,6 +36,7 @@ export interface ConversationItem {
   lastStepType: string | null;
   lastStepStatus: string | null;
   lastToolName: string | null;
+  waitingSinceAt: string | null;
   transcriptPath: string | null;
   activeSubagents: SubagentSummary[];
 }
@@ -58,6 +61,7 @@ export interface WindowPreferences {
   compactMode: boolean;
   showIdleRecent: boolean;
   includeCli: boolean;
+  sortMode: SortMode;
   themePreference: 'system' | 'light' | 'dark';
   opacity: number;
 }

@@ -9,9 +9,12 @@ import {
   SettingsIcon,
 } from './Icons.js';
 
+export type HeaderSeverity = 'idle' | 'running' | 'warning' | 'overdue';
+
 interface TitleBarProps {
   runningCount: number;
-  waitingCount: number;
+  severity: HeaderSeverity;
+  statusSummary: string;
   preferences: WindowPreferences;
   onTogglePin: () => void;
   onToggleCompact: () => void;
@@ -23,7 +26,8 @@ interface TitleBarProps {
 
 export const TitleBar: React.FC<TitleBarProps> = ({
   runningCount,
-  waitingCount,
+  severity,
+  statusSummary,
   preferences,
   onTogglePin,
   onToggleCompact,
@@ -32,30 +36,19 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   onHideToTray,
   onClose,
 }) => {
-  const brandState =
-    waitingCount > 0 ? 'waiting' : runningCount > 0 ? 'running' : 'idle';
-
   return (
     <header className="titlebar">
       <div className="titlebar-identity">
-        <span className="brand-mark" data-state={brandState} aria-hidden="true" />
-        <h1 className="app-title">Antigravity</h1>
+        <span className="brand-mark" data-state={severity} aria-hidden="true" />
+        <h1 className="app-title">Antigravity Sessions</h1>
         <span
           className="count-pill"
-          data-active={runningCount > 0}
-          aria-label={`${runningCount} active conversations`}
+          data-state={severity}
+          title={statusSummary}
+          aria-label={statusSummary}
         >
           {runningCount}
         </span>
-        {waitingCount > 0 && (
-          <span
-            className="count-pill"
-            data-waiting="true"
-            aria-label={`${waitingCount} waiting for input`}
-          >
-            {waitingCount} input
-          </span>
-        )}
       </div>
 
       <div className="titlebar-actions">

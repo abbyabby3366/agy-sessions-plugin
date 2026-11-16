@@ -16,13 +16,14 @@ import {
   getSourceDirs,
   readMonitorSnapshot,
 } from './antigravityReader.js';
+import { isQuestionOverdue } from '../shared/status.js';
 import {
   loadPersistedState,
   savePersistedState,
   type PersistedState,
   type WindowBounds,
 } from './preferences.js';
-import { createTrayIcon } from './trayIcon.js';
+import { createAppIcon, createTrayIcon, getAppIconPath } from './trayIcon.js';
 import type { ActionResult, MonitorSnapshot, WindowPreferences } from '../shared/types.js';
 
 const POLL_INTERVAL_MS = 1500;
@@ -101,19 +102,28 @@ function scheduleBoundsSave(): void {
 
 function updateTrayStatus(snapshot: MonitorSnapshot): void {
   if (!tray) return;
+  const nowMs = Date.now();
   const runningCount = snapshot.running.length;
   const waitingCount = snapshot.running.filter((c) => c.phase === 'waiting_input').length;
-  const sig = `${runningCount}:${waitingCount}`;
+  const stalledCount = snapshot.running.filter((c) => c.phase === 'stalled').length;
+  const overdueCount = snapshot.running.filter((c) => isQuestionOverdue(c, nowMs)).length;
+  const sig = `${runningCount}:${waitingCount}:${stalledCount}:${overdueCount}`;
 
   if (sig !== lastTraySignature) {
     lastTraySignature = sig;
-    tray.setImage(createTrayIcon(runningCount > 0, waitingCount > 0));
+    tray.setImage(
+      createTrayIcon(runningCount > 0, waitingCount > 0 || stalledCount > 0, overdueCount > 0)
+    );
     const tooltip =
       runningCount === 0
-        ? 'Antigravity Monitor — Idle'
-        : waitingCount > 0
-          ? `Antigravity Monitor — ${runningCount} active (${waitingCount} waiting input)`
-          : `Antigravity Monitor — ${runningCount} active`;
+        ? 'Antigravity Sessions — Idle'
+        : overdueCount > 0
+          ? `Antigravity Sessions — ${runningCount} active (${overdueCount} question >5m!)`
+          : waitingCount > 0
+            ? `Antigravity Sessions — ${runningCount} active (${waitingCount} waiting input)`
+            : stalledCount > 0
+              ? `Antigravity Sessions — ${runningCount} active (${stalledCount} stalled)`
+              : `Antigravity Sessions — ${runningCount} active`;
     tray.setToolTip(tooltip);
   }
 }
@@ -255,6 +265,7 @@ function createWindow(): void {
   const safeBounds = clampBoundsToDisplays(persistedState.bounds);
   const prefs = persistedState.preferences;
   nativeTheme.themeSource = prefs.themePreference;
+  const appIcon = createAppIcon();
 
   mainWindow = new BrowserWindow({
     x: safeBounds.x,
@@ -268,9 +279,10 @@ function createWindow(): void {
     alwaysOnTop: prefs.alwaysOnTop,
     skipTaskbar: false,
     show: false,
+    icon: getAppIconPath(),
     backgroundColor: resolveRendererBackground(prefs.themePreference),
     opacity: prefs.opacity,
-    title: 'Antigravity Monitor',
+    title: 'Antigravity Sessions',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -279,6 +291,9 @@ function createWindow(): void {
     },
   });
 
+  if (!appIcon.isEmpty()) {
+    mainWindow.setIcon(appIcon);
+  }
   mainWindow.setAlwaysOnTop(prefs.alwaysOnTop, 'floating');
   mainWindow.setVisibleOnAllWorkspaces(prefs.alwaysOnTop, { visibleOnFullScreen: true });
 
@@ -376,9 +391,13 @@ function setupIpc(): void {
   });
 }
 
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.desmond.antigravity-monitor');
+}
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
-  app.quit();
+  app.exit(0);
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {

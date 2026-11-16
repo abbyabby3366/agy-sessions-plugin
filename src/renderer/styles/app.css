@@ -111,9 +111,14 @@
     box-shadow: 0 0 0 3px var(--running-bg);
   }
 
-  .brand-mark[data-state='waiting'] {
+  .brand-mark[data-state='warning'] {
     background-color: var(--waiting);
     box-shadow: 0 0 0 3px var(--waiting-bg);
+  }
+
+  .brand-mark[data-state='overdue'] {
+    background-color: var(--danger);
+    box-shadow: 0 0 0 3px var(--danger-bg);
   }
 
   .app-title {
@@ -130,6 +135,8 @@
   .count-pill {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    min-width: 20px;
     gap: 4px;
     padding: 1px 6px;
     border-radius: 999px;
@@ -144,16 +151,22 @@
     flex: none;
   }
 
-  .count-pill[data-active='true'] {
+  .count-pill[data-state='running'] {
     background-color: var(--running-bg);
     border-color: var(--running-border);
     color: var(--running);
   }
 
-  .count-pill[data-waiting='true'] {
+  .count-pill[data-state='warning'] {
     background-color: var(--waiting-bg);
     border-color: var(--waiting-border);
     color: var(--waiting);
+  }
+
+  .count-pill[data-state='overdue'] {
+    background-color: var(--danger-bg);
+    border-color: var(--danger-border);
+    color: var(--danger);
   }
 
   .titlebar-actions {
@@ -229,6 +242,12 @@
     color: var(--text);
   }
 
+  .sort-btn[data-mode='action_needed'] {
+    background-color: var(--accent-tint);
+    border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+    color: var(--accent);
+  }
+
   /* Main scrollable workspace */
   .scroll-area {
     flex: 1;
@@ -295,6 +314,10 @@
     background-color: var(--surface);
   }
 
+  .conv-item[data-overdue='true'] {
+    background-color: color-mix(in srgb, var(--danger-bg) 55%, var(--surface));
+  }
+
   .conv-trigger {
     width: 100%;
     text-align: left;
@@ -352,6 +375,10 @@
 
   .status-indicator[data-phase='waiting_input'] {
     color: var(--waiting);
+  }
+
+  .status-indicator[data-phase='waiting_input'][data-overdue='true'] {
+    color: var(--danger);
   }
 
   .status-indicator[data-phase='stalled'] {
@@ -432,6 +459,17 @@
     border: 1px solid var(--waiting-border);
   }
 
+  .phase-tag[data-phase='waiting_input'][data-overdue='true'] {
+    background-color: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
+  }
+
+  .phase-tag.compact-overdue {
+    padding: 0 5px;
+    font-size: 9.5px;
+  }
+
   .phase-tag[data-phase='stalled'] {
     background-color: var(--stalled-bg);
     color: var(--stalled);
@@ -465,6 +503,55 @@
     color: var(--text);
     white-space: nowrap;
     flex: none;
+    line-height: 1.1;
+  }
+
+  .timer-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex: none;
+  }
+
+  .conv-list[data-compact='true'] .timer-stack {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .total-elapsed-sub {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-subtle);
+    white-space: nowrap;
+    line-height: 1.1;
+  }
+
+  .section-sum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: none;
+    letter-spacing: 0.01em;
+  }
+
+  .elapsed-inline {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  .elapsed-inline[data-overdue='true'] {
+    color: var(--danger);
+  }
+
+  .conv-item[data-phase='idle'] .elapsed-timer {
+    font-size: 14px;
+    color: var(--text-muted);
   }
 
   .conv-list[data-compact='true'] .elapsed-timer {
@@ -473,6 +560,10 @@
 
   .elapsed-timer[data-phase='waiting_input'] {
     color: var(--waiting);
+  }
+
+  .elapsed-timer[data-phase='waiting_input'][data-overdue='true'] {
+    color: var(--danger);
   }
 
   .elapsed-timer[data-long='true'] {
@@ -651,25 +742,6 @@
     font-size: 12px;
     color: var(--text-subtle);
     max-width: 28ch;
-  }
-
-  /* Footer Status Strip */
-  .footer-strip {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 5px 12px;
-    border-top: 1px solid var(--border);
-    background-color: var(--header-bg);
-    font-size: 11px;
-    letter-spacing: 0.015em;
-    color: var(--text-subtle);
-    flex-shrink: 0;
-  }
-
-  .footer-tz {
-    font-variant-numeric: tabular-nums;
   }
 
   /* Native Settings Dialog */

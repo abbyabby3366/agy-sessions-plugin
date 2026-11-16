@@ -10,6 +10,11 @@ import {
   readMonitorSnapshot,
 } from '../dist-electron/main/antigravityReader.js';
 import {
+  getQuestionWaitMs,
+  isQuestionOverdue,
+  sortConversations,
+} from '../dist-electron/shared/status.js';
+import {
   formatDateTimeGMT8,
   formatElapsed,
   parseTimestampMs,
@@ -262,6 +267,9 @@ describe('readMonitorSnapshot', () => {
     assert.equal(byId.get('conv-running')?.activeSubagents.length, 1);
     assert.equal(byId.get('conv-running')?.startedAt, '2026-11-16T06:10:00.000Z');
     assert.equal(byId.get('conv-waiting')?.phase, 'waiting_input');
+    assert.equal(byId.get('conv-waiting')?.waitingSinceAt, '2026-11-16T06:20:00.000Z');
+    assert.equal(isQuestionOverdue(byId.get('conv-waiting'), nowMs), true);
+    assert.equal(getQuestionWaitMs(byId.get('conv-waiting'), nowMs), 15 * 60 * 1000);
     assert.equal(byId.get('conv-stalled')?.phase, 'stalled');
     assert.equal(byId.get('conv-transcript-active')?.phase, 'running');
     assert.equal(byId.get('conv-transcript-active')?.lastModifiedAt, '2026-11-16T06:33:30.000Z');
@@ -278,6 +286,38 @@ describe('readMonitorSnapshot', () => {
     assert.equal(snapshot.sources.length, 1);
     assert.equal(snapshot.sources[0].ok, false);
     assert.match(snapshot.sources[0].error ?? '', /Database file not found/);
+  });
+
+  it('returns the last 10 idle runs regardless of age without older cutoff', () => {
+    const rootDir = createTempRoot();
+    const rows = Array.from({ length: 12 }, (_, idx) => {
+      const hour = String(idx).padStart(2, '0');
+      return {
+        conversation_id: `idle-${idx}`,
+        title: `Idle Run ${idx}`,
+        step_count: 5,
+        last_modified_time: `2026-11-15 ${hour}:30:00.0000000+00:00`,
+        workspace_uris: '["file:///c%3A/Users/desmo/Desktop/agy-custom"]',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        not_fully_idle: 0,
+        last_user_input_time: `2026-11-15 ${hour}:10:00.0000000+00:00`,
+      };
+    });
+
+    createTestSummariesDb(
+      path.join(rootDir, 'antigravity', 'conversation_summaries.db'),
+      rows
+    );
+
+    const snapshot = readMonitorSnapshot({
+      geminiRootDir: rootDir,
+      includeCli: false,
+      nowMs: Date.parse('2026-11-16T07:00:00.000Z'),
+    });
+
+    assert.equal(snapshot.recentIdle.length, 10);
+    assert.equal(snapshot.recentIdle[0].conversationId, 'idle-11');
+    assert.equal(snapshot.recentIdle[9].conversationId, 'idle-2');
   });
 
   it('classifies phase transitions accurately', () => {
@@ -301,6 +341,57 @@ describe('readMonitorSnapshot', () => {
         nowMs,
       }),
       'waiting_input'
+    );
+  });
+
+  it('flags overdue questions >5m and sorts action_needed by urgency', () => {
+    const nowMs = Date.parse('2026-11-16T07:10:00.000Z');
+    const makeItem = (id, phase, waitingSinceAt, lastUserInputAt) => ({
+      conversationId: id,
+      source: 'desktop',
+      title: id,
+      workspaceUri: null,
+      workspacePath: null,
+      workspaceName: id,
+      status: 'CASCADE_RUN_STATUS_RUNNING',
+      phase,
+      stepCount: 5,
+      nestingDepth: 0,
+      parentConversationId: null,
+      startedAt: lastUserInputAt,
+      lastUserInputAt,
+      lastModifiedAt: waitingSinceAt ?? lastUserInputAt,
+      lastStepType: 'PLANNER_RESPONSE',
+      lastStepStatus: 'DONE',
+      lastToolName: phase === 'waiting_input' ? 'ask_question' : null,
+      waitingSinceAt,
+      transcriptPath: null,
+      activeSubagents: [],
+    });
+
+    const runningOld = makeItem('running-old', 'running', null, '2026-11-16T06:30:00.000Z');
+    const stalled = makeItem('stalled-1', 'stalled', null, '2026-11-16T06:50:00.000Z');
+    const freshQ = makeItem(
+      'fresh-q',
+      'waiting_input',
+      '2026-11-16T07:07:00.000Z',
+      '2026-11-16T07:05:00.000Z'
+    );
+    const overdueQ = makeItem(
+      'overdue-q',
+      'waiting_input',
+      '2026-11-16T07:04:00.000Z',
+      '2026-11-16T07:02:00.000Z'
+    );
+
+    assert.equal(isQuestionOverdue(freshQ, nowMs), false);
+    assert.equal(isQuestionOverdue(overdueQ, nowMs), true);
+    assert.equal(isQuestionOverdue(runningOld, nowMs), false);
+
+    const sorted = sortConversations([runningOld, freshQ, stalled, overdueQ], 'action_needed', nowMs);
+    assert.deepEqual(
+      sorted.map((x) => x.conversationId),
+      ['overdue-q', 'fresh-q', 'stalled-1', 'running-old']
     );
   });
 });

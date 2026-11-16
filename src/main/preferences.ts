@@ -10,22 +10,26 @@ export interface WindowBounds {
 }
 
 export interface PersistedState {
+  version?: number;
   preferences: WindowPreferences;
   bounds: WindowBounds;
 }
 
+const CURRENT_STATE_VERSION = 2;
+
 export const DEFAULT_PREFERENCES: WindowPreferences = {
   alwaysOnTop: true,
   compactMode: false,
-  showIdleRecent: false,
+  showIdleRecent: true,
   includeCli: true,
+  sortMode: 'duration',
   themePreference: 'system',
   opacity: 0.96,
 };
 
 export const DEFAULT_BOUNDS: WindowBounds = {
   width: 410,
-  height: 460,
+  height: 560,
 };
 
 function sanitizePreferences(raw: unknown): WindowPreferences {
@@ -38,6 +42,12 @@ function sanitizePreferences(raw: unknown): WindowPreferences {
     obj.themePreference === 'system'
       ? obj.themePreference
       : DEFAULT_PREFERENCES.themePreference;
+  const sortMode =
+    obj.sortMode === 'duration' ||
+    obj.sortMode === 'action_needed' ||
+    obj.sortMode === 'activity'
+      ? obj.sortMode
+      : DEFAULT_PREFERENCES.sortMode;
 
   return {
     alwaysOnTop:
@@ -50,6 +60,7 @@ function sanitizePreferences(raw: unknown): WindowPreferences {
         : DEFAULT_PREFERENCES.showIdleRecent,
     includeCli:
       typeof obj.includeCli === 'boolean' ? obj.includeCli : DEFAULT_PREFERENCES.includeCli,
+    sortMode,
     themePreference: themePref,
     opacity,
   };
@@ -75,6 +86,7 @@ function sanitizeBounds(raw: unknown): WindowBounds {
 export function loadPersistedState(stateFilePath: string): PersistedState {
   if (!fs.existsSync(stateFilePath)) {
     return {
+      version: CURRENT_STATE_VERSION,
       preferences: { ...DEFAULT_PREFERENCES },
       bounds: { ...DEFAULT_BOUNDS },
     };
@@ -82,13 +94,20 @@ export function loadPersistedState(stateFilePath: string): PersistedState {
 
   try {
     const raw = JSON.parse(fs.readFileSync(stateFilePath, 'utf-8')) as Record<string, unknown>;
+    const version = typeof raw.version === 'number' ? raw.version : 1;
+    const preferences = sanitizePreferences(raw.preferences);
+    if (version < CURRENT_STATE_VERSION) {
+      preferences.showIdleRecent = true;
+    }
     return {
-      preferences: sanitizePreferences(raw.preferences),
+      version: CURRENT_STATE_VERSION,
+      preferences,
       bounds: sanitizeBounds(raw.bounds),
     };
   } catch (err) {
     console.error('[sticky-monitor] Failed to parse saved window state:', err);
     return {
+      version: CURRENT_STATE_VERSION,
       preferences: { ...DEFAULT_PREFERENCES },
       bounds: { ...DEFAULT_BOUNDS },
     };
@@ -97,5 +116,9 @@ export function loadPersistedState(stateFilePath: string): PersistedState {
 
 export function savePersistedState(stateFilePath: string, state: PersistedState): void {
   fs.mkdirSync(path.dirname(stateFilePath), { recursive: true });
-  fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2), 'utf-8');
+  fs.writeFileSync(
+    stateFilePath,
+    JSON.stringify({ ...state, version: CURRENT_STATE_VERSION }, null, 2),
+    'utf-8'
+  );
 }

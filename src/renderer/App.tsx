@@ -1,37 +1,43 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { formatDateTimeGMT8, parseTimestampMs } from '../shared/time.js';
+import { isQuestionOverdue, sortConversations } from '../shared/status.js';
+import { formatElapsed, parseTimestampMs } from '../shared/time.js';
 import type {
   ConversationItem,
   MonitorSnapshot,
+  SortMode,
   WindowPreferences,
 } from '../shared/types.js';
 import { ConversationRow } from './components/ConversationRow.js';
 import { AlertIcon, SortIcon } from './components/Icons.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
-import { TitleBar } from './components/TitleBar.js';
+import { TitleBar, type HeaderSeverity } from './components/TitleBar.js';
 
-type SortMode = 'duration' | 'activity';
+const SORT_LABELS: Record<SortMode, string> = {
+  duration: 'Longest first',
+  action_needed: 'Action needed',
+  activity: 'Recent step',
+};
+
+const SORT_CYCLE: SortMode[] = ['duration', 'action_needed', 'activity'];
 
 const INITIAL_PREFS: WindowPreferences = {
   alwaysOnTop: true,
   compactMode: false,
-  showIdleRecent: false,
+  showIdleRecent: true,
   includeCli: true,
+  sortMode: 'duration',
   themePreference: 'system',
   opacity: 0.96,
 };
 
-function sortConversations(items: ConversationItem[], mode: SortMode): ConversationItem[] {
-  return [...items].sort((a, b) => {
-    if (mode === 'duration') {
-      const aStart = parseTimestampMs(a.lastUserInputAt) ?? Number.MAX_SAFE_INTEGER;
-      const bStart = parseTimestampMs(b.lastUserInputAt) ?? Number.MAX_SAFE_INTEGER;
-      if (aStart !== bStart) return aStart - bStart;
-    }
-    const aMod = parseTimestampMs(a.lastModifiedAt) ?? 0;
-    const bMod = parseTimestampMs(b.lastModifiedAt) ?? 0;
-    return bMod - aMod;
-  });
+function computeTotalElapsedMs(item: ConversationItem, nowMs: number): number {
+  const startMs = parseTimestampMs(item.startedAt) ?? parseTimestampMs(item.lastUserInputAt);
+  if (startMs === null) return 0;
+  if (item.phase === 'idle') {
+    const endMs = parseTimestampMs(item.lastModifiedAt);
+    return endMs !== null && endMs >= startMs ? endMs - startMs : 0;
+  }
+  return Math.max(0, nowMs - startMs);
 }
 
 export const App: React.FC = () => {
@@ -40,7 +46,6 @@ export const App: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [sortMode, setSortMode] = useState<SortMode>('duration');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
@@ -146,9 +151,11 @@ export const App: React.FC = () => {
     }
   };
 
+  const sortMode = preferences.sortMode;
+
   const sortedRunning = useMemo(
-    () => (snapshot ? sortConversations(snapshot.running, sortMode) : []),
-    [snapshot, sortMode]
+    () => (snapshot ? sortConversations(snapshot.running, sortMode, nowMs) : []),
+    [snapshot, sortMode, nowMs]
   );
 
   const waitingCount = useMemo(
@@ -156,18 +163,67 @@ export const App: React.FC = () => {
     [sortedRunning]
   );
 
+  const stalledCount = useMemo(
+    () => sortedRunning.filter((c) => c.phase === 'stalled').length,
+    [sortedRunning]
+  );
+
+  const overdueCount = useMemo(
+    () => sortedRunning.filter((c) => isQuestionOverdue(c, nowMs)).length,
+    [sortedRunning, nowMs]
+  );
+
+  const headerSeverity: HeaderSeverity =
+    overdueCount > 0
+      ? 'overdue'
+      : waitingCount > 0 || stalledCount > 0
+        ? 'warning'
+        : sortedRunning.length > 0
+          ? 'running'
+          : 'idle';
+
+  const statusSummary = useMemo(() => {
+    if (sortedRunning.length === 0) return '0 active conversations';
+    const notes: string[] = [];
+    if (overdueCount > 0) notes.push(`${overdueCount} overdue >5m`);
+    const freshWaiting = waitingCount - overdueCount;
+    if (freshWaiting > 0) notes.push(`${freshWaiting} waiting input`);
+    if (stalledCount > 0) notes.push(`${stalledCount} stalled`);
+    return notes.length > 0
+      ? `${sortedRunning.length} active (${notes.join(', ')})`
+      : `${sortedRunning.length} active`;
+  }, [sortedRunning.length, overdueCount, waitingCount, stalledCount]);
+
+  const cycleSortMode = () => {
+    const idx = SORT_CYCLE.indexOf(sortMode);
+    const next = SORT_CYCLE[(idx + 1) % SORT_CYCLE.length];
+    handleUpdatePrefs({ sortMode: next });
+  };
+
   const failingSources = useMemo(
     () => (snapshot ? snapshot.sources.filter((s) => !s.ok) : []),
     [snapshot]
   );
 
-  const capturedGmt8 = snapshot ? formatDateTimeGMT8(snapshot.capturedAt) : null;
+  const activeTotalMs = useMemo(
+    () => sortedRunning.reduce((sum, item) => sum + computeTotalElapsedMs(item, nowMs), 0),
+    [sortedRunning, nowMs]
+  );
+
+  const idleTotalMs = useMemo(
+    () =>
+      snapshot
+        ? snapshot.recentIdle.reduce((sum, item) => sum + computeTotalElapsedMs(item, nowMs), 0)
+        : 0,
+    [snapshot, nowMs]
+  );
 
   return (
     <>
       <TitleBar
         runningCount={sortedRunning.length}
-        waitingCount={waitingCount}
+        severity={headerSeverity}
+        statusSummary={statusSummary}
         preferences={preferences}
         onTogglePin={() => handleUpdatePrefs({ alwaysOnTop: !preferences.alwaysOnTop })}
         onToggleCompact={() =>
@@ -213,17 +269,19 @@ export const App: React.FC = () => {
         ))}
 
         <div className="section-header">
-          <span>Active Runs</span>
+          <span>
+            Active Runs
+            {sortedRunning.length > 0 ? ` · Total ${formatElapsed(activeTotalMs)}` : ''}
+          </span>
           <button
             type="button"
             className="sort-btn"
-            aria-label={`Sort order: ${sortMode === 'duration' ? 'Longest running' : 'Latest step'}`}
-            onClick={() =>
-              setSortMode((m) => (m === 'duration' ? 'activity' : 'duration'))
-            }
+            data-mode={sortMode}
+            aria-label={`Sort order: ${SORT_LABELS[sortMode]}. Click to switch`}
+            onClick={cycleSortMode}
           >
             <SortIcon />
-            {sortMode === 'duration' ? 'Longest first' : 'Recent step'}
+            {SORT_LABELS[sortMode]}
           </button>
         </div>
 
@@ -266,8 +324,8 @@ export const App: React.FC = () => {
         {preferences.showIdleRecent && snapshot && snapshot.recentIdle.length > 0 && (
           <>
             <div className="section-header">
-              <span>Recently Finished (30m)</span>
-              <span>{snapshot.recentIdle.length}</span>
+              <span>Last {snapshot.recentIdle.length} Idle Runs</span>
+              <span className="section-sum">Total {formatElapsed(idleTotalMs)}</span>
             </div>
             <ul
               className="conv-list"
@@ -293,15 +351,6 @@ export const App: React.FC = () => {
           </>
         )}
       </main>
-
-      <footer className="footer-strip">
-        <span>Auto-sync active</span>
-        <span className="footer-tz">
-          {capturedGmt8
-            ? `${capturedGmt8.date} · ${capturedGmt8.time} GMT+8`
-            : 'Waiting…'}
-        </span>
-      </footer>
 
       <SettingsDialog
         open={settingsOpen}
