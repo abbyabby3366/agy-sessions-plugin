@@ -16,7 +16,7 @@ import {
   getSourceDirs,
   readMonitorSnapshot,
 } from './antigravityReader.js';
-import { isQuestionOverdue } from '../shared/status.js';
+import { isQuestionOverdue, resolveAlwaysOnTop } from '../shared/status.js';
 import {
   loadPersistedState,
   savePersistedState,
@@ -39,6 +39,9 @@ let boundsDebounceTimer: NodeJS.Timeout | null = null;
 const activeWatchers: fs.FSWatcher[] = [];
 let lastSnapshotSignature = '';
 let lastTraySignature = '';
+let latestSnapshot: MonitorSnapshot | null = null;
+let appliedAlwaysOnTop: boolean | null = null;
+let isProgrammaticHeightChange = false;
 
 function resolveRendererBackground(pref: WindowPreferences['themePreference']): string {
   const isDark =
@@ -85,10 +88,10 @@ function persistStateNow(): void {
 }
 
 function scheduleBoundsSave(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed() || isProgrammaticHeightChange) return;
   if (boundsDebounceTimer) clearTimeout(boundsDebounceTimer);
   boundsDebounceTimer = setTimeout(() => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow || mainWindow.isDestroyed() || isProgrammaticHeightChange) return;
     const b = mainWindow.getBounds();
     persistedState.bounds = {
       x: b.x,
@@ -142,9 +145,24 @@ function buildSignature(snapshot: MonitorSnapshot): string {
   });
 }
 
+function syncStickyOnTop(prefs: WindowPreferences, snapshot: MonitorSnapshot | null): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const shouldBeOnTop = snapshot
+    ? resolveAlwaysOnTop(prefs.stickyMode, snapshot.running)
+    : prefs.stickyMode === 'always';
+
+  if (appliedAlwaysOnTop !== shouldBeOnTop) {
+    appliedAlwaysOnTop = shouldBeOnTop;
+    mainWindow.setAlwaysOnTop(shouldBeOnTop, 'floating');
+    mainWindow.setVisibleOnAllWorkspaces(shouldBeOnTop, { visibleOnFullScreen: true });
+  }
+}
+
 function pushSnapshot(force = false): MonitorSnapshot {
   const snapshot = computeSnapshot();
+  latestSnapshot = snapshot;
   updateTrayStatus(snapshot);
+  syncStickyOnTop(persistedState.preferences, snapshot);
 
   const signature = buildSignature(snapshot);
   if (force || signature !== lastSnapshotSignature) {
@@ -197,8 +215,7 @@ function applyPreferencesToWindow(prefs: WindowPreferences): void {
   nativeTheme.themeSource = prefs.themePreference;
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  mainWindow.setAlwaysOnTop(prefs.alwaysOnTop, 'floating');
-  mainWindow.setVisibleOnAllWorkspaces(prefs.alwaysOnTop, { visibleOnFullScreen: true });
+  syncStickyOnTop(prefs, latestSnapshot);
   mainWindow.setOpacity(prefs.opacity);
   mainWindow.setBackgroundColor(resolveRendererBackground(prefs.themePreference));
 }
@@ -206,6 +223,16 @@ function applyPreferencesToWindow(prefs: WindowPreferences): void {
 function rebuildTrayMenu(): void {
   if (!tray) return;
   const prefs = persistedState.preferences;
+  const setSticky = (stickyMode: WindowPreferences['stickyMode']) => {
+    persistedState.preferences = { ...persistedState.preferences, stickyMode };
+    applyPreferencesToWindow(persistedState.preferences);
+    persistStateNow();
+    rebuildTrayMenu();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('prefs:changed', persistedState.preferences);
+    }
+  };
+
   const menu = Menu.buildFromTemplate([
     {
       label: mainWindow?.isVisible() ? 'Hide Widget' : 'Show Widget',
@@ -213,18 +240,27 @@ function rebuildTrayMenu(): void {
     },
     { type: 'separator' },
     {
-      label: 'Always on Top',
-      type: 'checkbox',
-      checked: prefs.alwaysOnTop,
-      click: (item) => {
-        persistedState.preferences = { ...persistedState.preferences, alwaysOnTop: item.checked };
-        applyPreferencesToWindow(persistedState.preferences);
-        persistStateNow();
-        rebuildTrayMenu();
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('prefs:changed', persistedState.preferences);
-        }
-      },
+      label: 'Sticky on Top',
+      submenu: [
+        {
+          label: 'Only on Question',
+          type: 'radio',
+          checked: prefs.stickyMode === 'on_question',
+          click: () => setSticky('on_question'),
+        },
+        {
+          label: 'Always',
+          type: 'radio',
+          checked: prefs.stickyMode === 'always',
+          click: () => setSticky('always'),
+        },
+        {
+          label: 'Off',
+          type: 'radio',
+          checked: prefs.stickyMode === 'off',
+          click: () => setSticky('off'),
+        },
+      ],
     },
     {
       label: 'Compact Mode',
@@ -241,7 +277,7 @@ function rebuildTrayMenu(): void {
     },
     { type: 'separator' },
     {
-      label: 'Quit Antigravity Monitor',
+      label: 'Quit Antigravity Sessions',
       click: () => {
         app.quit();
       },
@@ -267,16 +303,17 @@ function createWindow(): void {
   nativeTheme.themeSource = prefs.themePreference;
   const appIcon = createAppIcon();
 
+  const initialOnTop = prefs.stickyMode === 'always';
   mainWindow = new BrowserWindow({
     x: safeBounds.x,
     y: safeBounds.y,
     width: safeBounds.width,
     height: safeBounds.height,
     minWidth: 310,
-    minHeight: 160,
+    minHeight: 110,
     frame: false,
     resizable: true,
-    alwaysOnTop: prefs.alwaysOnTop,
+    alwaysOnTop: initialOnTop,
     skipTaskbar: false,
     show: false,
     icon: getAppIconPath(),
@@ -294,8 +331,9 @@ function createWindow(): void {
   if (!appIcon.isEmpty()) {
     mainWindow.setIcon(appIcon);
   }
-  mainWindow.setAlwaysOnTop(prefs.alwaysOnTop, 'floating');
-  mainWindow.setVisibleOnAllWorkspaces(prefs.alwaysOnTop, { visibleOnFullScreen: true });
+  appliedAlwaysOnTop = initialOnTop;
+  mainWindow.setAlwaysOnTop(initialOnTop, 'floating');
+  mainWindow.setVisibleOnAllWorkspaces(initialOnTop, { visibleOnFullScreen: true });
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
@@ -320,7 +358,9 @@ function createWindow(): void {
 function setupIpc(): void {
   ipcMain.handle('monitor:get-snapshot', () => {
     const snapshot = computeSnapshot();
+    latestSnapshot = snapshot;
     updateTrayStatus(snapshot);
+    syncStickyOnTop(persistedState.preferences, snapshot);
     lastSnapshotSignature = buildSignature(snapshot);
     return snapshot;
   });
@@ -360,6 +400,38 @@ function setupIpc(): void {
 
   ipcMain.handle('window:close', () => {
     app.quit();
+  });
+
+  ipcMain.handle('window:set-content-height', (_event, desiredHeight: number) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!Number.isFinite(desiredHeight)) return;
+    const bounds = mainWindow.getBounds();
+    const display = screen.getDisplayMatching(bounds);
+    const maxHeight = Math.min(620, Math.max(240, display.workArea.height - 40));
+    const targetHeight = Math.round(Math.min(maxHeight, Math.max(110, desiredHeight)));
+    const targetWidth = persistedState.bounds.width;
+    if (Math.abs(bounds.height - targetHeight) <= 1 && Math.abs(bounds.width - targetWidth) <= 1) {
+      return;
+    }
+    const maxY = display.workArea.y + display.workArea.height - targetHeight;
+    const clampedY = Math.min(bounds.y, Math.max(display.workArea.y, maxY));
+    isProgrammaticHeightChange = true;
+    try {
+      if (clampedY !== bounds.y) {
+        mainWindow.setBounds({
+          x: bounds.x,
+          y: clampedY,
+          width: targetWidth,
+          height: targetHeight,
+        });
+      } else {
+        mainWindow.setSize(targetWidth, targetHeight);
+      }
+    } finally {
+      setImmediate(() => {
+        isProgrammaticHeightChange = false;
+      });
+    }
   });
 
   ipcMain.handle('shell:open-path', async (_event, targetPath: string): Promise<ActionResult> => {
@@ -415,7 +487,7 @@ if (!gotSingleInstanceLock) {
     createWindow();
 
     tray = new Tray(createTrayIcon(false, false));
-    tray.setToolTip('Antigravity Monitor');
+    tray.setToolTip('Antigravity Sessions');
     tray.on('click', () => toggleWindowVisibility());
     rebuildTrayMenu();
 

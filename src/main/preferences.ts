@@ -15,14 +15,15 @@ export interface PersistedState {
   bounds: WindowBounds;
 }
 
-const CURRENT_STATE_VERSION = 2;
+const CURRENT_STATE_VERSION = 5;
 
 export const DEFAULT_PREFERENCES: WindowPreferences = {
-  alwaysOnTop: true,
+  stickyMode: 'on_question',
   compactMode: false,
   showIdleRecent: true,
+  idleExpanded: false,
   includeCli: true,
-  sortMode: 'duration',
+  sortMode: 'action_needed',
   themePreference: 'system',
   opacity: 0.96,
 };
@@ -48,16 +49,25 @@ function sanitizePreferences(raw: unknown): WindowPreferences {
     obj.sortMode === 'activity'
       ? obj.sortMode
       : DEFAULT_PREFERENCES.sortMode;
+  const stickyMode =
+    obj.stickyMode === 'on_question' ||
+    obj.stickyMode === 'always' ||
+    obj.stickyMode === 'off'
+      ? obj.stickyMode
+      : DEFAULT_PREFERENCES.stickyMode;
 
   return {
-    alwaysOnTop:
-      typeof obj.alwaysOnTop === 'boolean' ? obj.alwaysOnTop : DEFAULT_PREFERENCES.alwaysOnTop,
+    stickyMode,
     compactMode:
       typeof obj.compactMode === 'boolean' ? obj.compactMode : DEFAULT_PREFERENCES.compactMode,
     showIdleRecent:
       typeof obj.showIdleRecent === 'boolean'
         ? obj.showIdleRecent
         : DEFAULT_PREFERENCES.showIdleRecent,
+    idleExpanded:
+      typeof obj.idleExpanded === 'boolean'
+        ? obj.idleExpanded
+        : DEFAULT_PREFERENCES.idleExpanded,
     includeCli:
       typeof obj.includeCli === 'boolean' ? obj.includeCli : DEFAULT_PREFERENCES.includeCli,
     sortMode,
@@ -96,8 +106,17 @@ export function loadPersistedState(stateFilePath: string): PersistedState {
     const raw = JSON.parse(fs.readFileSync(stateFilePath, 'utf-8')) as Record<string, unknown>;
     const version = typeof raw.version === 'number' ? raw.version : 1;
     const preferences = sanitizePreferences(raw.preferences);
-    if (version < CURRENT_STATE_VERSION) {
+    if (version < 2) {
       preferences.showIdleRecent = true;
+    }
+    if (version < 3) {
+      preferences.idleExpanded = false;
+    }
+    if (version < 4) {
+      preferences.stickyMode = 'on_question';
+    }
+    if (version < 5) {
+      preferences.sortMode = 'action_needed';
     }
     return {
       version: CURRENT_STATE_VERSION,

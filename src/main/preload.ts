@@ -32,6 +32,8 @@ const api: StickyMonitorApi = {
   minimizeWindow: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
   hideToTray: (): Promise<void> => ipcRenderer.invoke('window:hide'),
   closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
+  setContentHeight: (height: number): Promise<void> =>
+    ipcRenderer.invoke('window:set-content-height', height),
   openPath: (targetPath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('shell:open-path', targetPath),
   revealFile: (targetPath: string): Promise<ActionResult> =>

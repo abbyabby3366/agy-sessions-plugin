@@ -87,7 +87,6 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
     elapsedText = formatElapsed(elapsedMs);
   }
 
-  let totalElapsedText: string | null = null;
   let totalElapsedMs: number | null = null;
   if (chatStartMs !== null) {
     if (item.phase === 'idle') {
@@ -103,14 +102,15 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
     totalElapsedMs = Math.max(0, nowMs - turnStartMs);
   }
 
-  if (totalElapsedMs !== null) {
-    totalElapsedText = formatElapsed(totalElapsedMs);
-  }
+  const totalElapsedText = totalElapsedMs !== null ? formatElapsed(totalElapsedMs) : '--:--';
 
   const workspaceLabel =
     item.workspaceName ?? (item.nestingDepth > 0 ? 'Subagent' : 'No Workspace');
   const stepSummary = formatStepSummary(item);
-  const isLongRun = item.phase === 'running' && elapsedMs >= LONG_RUN_THRESHOLD_MS;
+  const isLongRun =
+    item.phase === 'running' &&
+    turnStartMs !== null &&
+    elapsedMs >= LONG_RUN_THRESHOLD_MS;
   const waitMs = getQuestionWaitMs(item, nowMs);
   const overdueQuestion = isQuestionOverdue(item, nowMs);
 
@@ -153,35 +153,20 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
                 {overdueQuestion ? 'No Reply >5m' : PHASE_LABEL[item.phase]}
               </span>
             )}
-            {compact && overdueQuestion && (
-              <span className="phase-tag compact-overdue" data-phase="waiting_input" data-overdue="true">
-                5m+
-              </span>
-            )}
             {compact && item.title && (
               <span className="compact-title">— {item.title}</span>
             )}
           </div>
 
-          <div className="timer-stack">
-            <span
-              className="elapsed-timer"
-              data-phase={item.phase}
-              data-overdue={overdueQuestion}
-              data-long={isLongRun}
-              aria-label={`Turn elapsed ${elapsedText}`}
-            >
-              {elapsedText}
-            </span>
-            {totalElapsedText !== null && (
-              <span
-                className="total-elapsed-sub"
-                aria-label={`Total elapsed ${totalElapsedText}`}
-              >
-                {compact ? `Σ ${totalElapsedText}` : `Total ${totalElapsedText}`}
-              </span>
-            )}
-          </div>
+          <span
+            className="elapsed-timer"
+            data-phase={item.phase}
+            data-overdue={overdueQuestion}
+            data-long={isLongRun}
+            aria-label={`Elapsed since last prompt ${elapsedText}`}
+          >
+            {elapsedText}
+          </span>
         </div>
 
         {!compact && (
@@ -213,7 +198,7 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
               <tr>
                 <th scope="row">Total Elapsed</th>
                 <td>
-                  <code className="elapsed-inline">{totalElapsedText ?? '--:--'}</code>
+                  <code className="elapsed-inline">{totalElapsedText}</code>
                 </td>
               </tr>
               {waitMs !== null && (

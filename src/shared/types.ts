@@ -8,6 +8,8 @@ export type ActivityPhase =
 
 export type SortMode = 'duration' | 'action_needed' | 'activity';
 
+export type StickyMode = 'on_question' | 'always' | 'off';
+
 export interface SubagentSummary {
   conversationId: string;
   title: string | null;
@@ -57,9 +59,10 @@ export interface MonitorSnapshot {
 }
 
 export interface WindowPreferences {
-  alwaysOnTop: boolean;
+  stickyMode: StickyMode;
   compactMode: boolean;
   showIdleRecent: boolean;
+  idleExpanded: boolean;
   includeCli: boolean;
   sortMode: SortMode;
   themePreference: 'system' | 'light' | 'dark';
@@ -80,6 +83,7 @@ export interface StickyMonitorApi {
   minimizeWindow: () => Promise<void>;
   hideToTray: () => Promise<void>;
   closeWindow: () => Promise<void>;
+  setContentHeight: (height: number) => Promise<void>;
   openPath: (targetPath: string) => Promise<ActionResult>;
   revealFile: (targetPath: string) => Promise<ActionResult>;
   copyText: (text: string) => Promise<ActionResult>;

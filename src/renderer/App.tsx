@@ -1,44 +1,24 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isQuestionOverdue, sortConversations } from '../shared/status.js';
-import { formatElapsed, parseTimestampMs } from '../shared/time.js';
 import type {
-  ConversationItem,
   MonitorSnapshot,
-  SortMode,
   WindowPreferences,
 } from '../shared/types.js';
 import { ConversationRow } from './components/ConversationRow.js';
-import { AlertIcon, SortIcon } from './components/Icons.js';
+import { AlertIcon, ChevronRightIcon } from './components/Icons.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { TitleBar, type HeaderSeverity } from './components/TitleBar.js';
 
-const SORT_LABELS: Record<SortMode, string> = {
-  duration: 'Longest first',
-  action_needed: 'Action needed',
-  activity: 'Recent step',
-};
-
-const SORT_CYCLE: SortMode[] = ['duration', 'action_needed', 'activity'];
-
 const INITIAL_PREFS: WindowPreferences = {
-  alwaysOnTop: true,
+  stickyMode: 'on_question',
   compactMode: false,
   showIdleRecent: true,
+  idleExpanded: false,
   includeCli: true,
-  sortMode: 'duration',
+  sortMode: 'action_needed',
   themePreference: 'system',
   opacity: 0.96,
 };
-
-function computeTotalElapsedMs(item: ConversationItem, nowMs: number): number {
-  const startMs = parseTimestampMs(item.startedAt) ?? parseTimestampMs(item.lastUserInputAt);
-  if (startMs === null) return 0;
-  if (item.phase === 'idle') {
-    const endMs = parseTimestampMs(item.lastModifiedAt);
-    return endMs !== null && endMs >= startMs ? endMs - startMs : 0;
-  }
-  return Math.max(0, nowMs - startMs);
-}
 
 export const App: React.FC = () => {
   const [snapshot, setSnapshot] = useState<MonitorSnapshot | null>(null);
@@ -48,6 +28,7 @@ export const App: React.FC = () => {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -194,29 +175,44 @@ export const App: React.FC = () => {
       : `${sortedRunning.length} active`;
   }, [sortedRunning.length, overdueCount, waitingCount, stalledCount]);
 
-  const cycleSortMode = () => {
-    const idx = SORT_CYCLE.indexOf(sortMode);
-    const next = SORT_CYCLE[(idx + 1) % SORT_CYCLE.length];
-    handleUpdatePrefs({ sortMode: next });
-  };
-
   const failingSources = useMemo(
     () => (snapshot ? snapshot.sources.filter((s) => !s.ok) : []),
     [snapshot]
   );
 
-  const activeTotalMs = useMemo(
-    () => sortedRunning.reduce((sum, item) => sum + computeTotalElapsedMs(item, nowMs), 0),
-    [sortedRunning, nowMs]
-  );
+  useLayoutEffect(() => {
+    const syncHeight = () => {
+      const contentEl = contentRef.current;
+      if (!contentEl) return;
+      const titlebarEl = document.querySelector('.titlebar');
+      const titlebarHeight =
+        titlebarEl instanceof HTMLElement ? titlebarEl.offsetHeight : 38;
+      const naturalHeight = titlebarHeight + contentEl.offsetHeight + 2;
+      const desired = settingsOpen ? Math.max(naturalHeight, 440) : naturalHeight;
+      void window.stickyMonitor.setContentHeight(desired);
+    };
 
-  const idleTotalMs = useMemo(
-    () =>
-      snapshot
-        ? snapshot.recentIdle.reduce((sum, item) => sum + computeTotalElapsedMs(item, nowMs), 0)
-        : 0,
-    [snapshot, nowMs]
-  );
+    syncHeight();
+
+    const contentEl = contentRef.current;
+    if (!contentEl) return;
+    const observer = new ResizeObserver(() => {
+      syncHeight();
+    });
+    observer.observe(contentEl);
+    return () => observer.disconnect();
+  }, [
+    settingsOpen,
+    preferences.compactMode,
+    preferences.showIdleRecent,
+    preferences.idleExpanded,
+    sortedRunning.length,
+    snapshot?.recentIdle.length,
+    expandedId,
+    loadError,
+    actionError,
+    failingSources.length,
+  ]);
 
   return (
     <>
@@ -224,19 +220,14 @@ export const App: React.FC = () => {
         runningCount={sortedRunning.length}
         severity={headerSeverity}
         statusSummary={statusSummary}
-        preferences={preferences}
-        onTogglePin={() => handleUpdatePrefs({ alwaysOnTop: !preferences.alwaysOnTop })}
-        onToggleCompact={() =>
-          handleUpdatePrefs({ compactMode: !preferences.compactMode })
-        }
         onOpenSettings={() => setSettingsOpen(true)}
         onMinimize={() => void window.stickyMonitor.minimizeWindow()}
-        onHideToTray={() => void window.stickyMonitor.hideToTray()}
         onClose={() => void window.stickyMonitor.closeWindow()}
       />
 
       <main className="scroll-area">
-        {loadError && (
+        <div ref={contentRef} className="scroll-content">
+          {loadError && (
           <div className="error-banner" role="alert">
             <AlertIcon />
             <div className="error-banner-body">
@@ -269,20 +260,7 @@ export const App: React.FC = () => {
         ))}
 
         <div className="section-header">
-          <span>
-            Active Runs
-            {sortedRunning.length > 0 ? ` · Total ${formatElapsed(activeTotalMs)}` : ''}
-          </span>
-          <button
-            type="button"
-            className="sort-btn"
-            data-mode={sortMode}
-            aria-label={`Sort order: ${SORT_LABELS[sortMode]}. Click to switch`}
-            onClick={cycleSortMode}
-          >
-            <SortIcon />
-            {SORT_LABELS[sortMode]}
-          </button>
+          <span>Active Runs</span>
         </div>
 
         {!snapshot && !loadError ? (
@@ -323,39 +301,53 @@ export const App: React.FC = () => {
 
         {preferences.showIdleRecent && snapshot && snapshot.recentIdle.length > 0 && (
           <>
-            <div className="section-header">
-              <span>Last {snapshot.recentIdle.length} Idle Runs</span>
-              <span className="section-sum">Total {formatElapsed(idleTotalMs)}</span>
-            </div>
-            <ul
-              className="conv-list"
-              role="list"
-              data-compact={preferences.compactMode}
+            <button
+              type="button"
+              className="section-toggle"
+              aria-expanded={preferences.idleExpanded}
+              onClick={() =>
+                handleUpdatePrefs({ idleExpanded: !preferences.idleExpanded })
+              }
             >
-              {snapshot.recentIdle.map((item) => (
-                <ConversationRow
-                  key={`idle:${item.source}:${item.conversationId}`}
-                  item={item}
-                  nowMs={nowMs}
-                  compact={preferences.compactMode}
-                  expanded={expandedId === item.conversationId}
-                  onToggleExpand={(id) =>
-                    setExpandedId((curr) => (curr === id ? null : id))
-                  }
-                  onOpenPath={handleOpenPath}
-                  onRevealFile={handleRevealFile}
-                  onCopyId={handleCopyId}
-                />
-              ))}
-            </ul>
+              <span className="section-toggle-label">
+                <ChevronRightIcon className="section-chevron" />
+                <span>Last {snapshot.recentIdle.length} Idle Runs</span>
+              </span>
+            </button>
+
+            {preferences.idleExpanded && (
+              <ul
+                className="conv-list"
+                role="list"
+                data-compact={preferences.compactMode}
+              >
+                {snapshot.recentIdle.map((item) => (
+                  <ConversationRow
+                    key={`idle:${item.source}:${item.conversationId}`}
+                    item={item}
+                    nowMs={nowMs}
+                    compact={preferences.compactMode}
+                    expanded={expandedId === item.conversationId}
+                    onToggleExpand={(id) =>
+                      setExpandedId((curr) => (curr === id ? null : id))
+                    }
+                    onOpenPath={handleOpenPath}
+                    onRevealFile={handleRevealFile}
+                    onCopyId={handleCopyId}
+                  />
+                ))}
+              </ul>
+            )}
           </>
         )}
+        </div>
       </main>
 
       <SettingsDialog
         open={settingsOpen}
         preferences={preferences}
         onUpdate={handleUpdatePrefs}
+        onHideToTray={() => void window.stickyMonitor.hideToTray()}
         onClose={() => setSettingsOpen(false)}
       />
     </>

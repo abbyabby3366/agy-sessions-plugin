@@ -257,6 +257,23 @@ export const FolderIcon: React.FC<IconProps> = ({ size = 12, className }) => (
   </svg>
 );
 
+export const ChevronRightIcon: React.FC<IconProps> = ({ size = 12, className }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2.2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    className={className}
+  >
+    <path d="m9 18 6-6-6-6" />
+  </svg>
+);
+
 export const FileTextIcon: React.FC<IconProps> = ({ size = 12, className }) => (
   <svg
     width={size}

@@ -1,7 +1,16 @@
 import { parseTimestampMs } from './time.js';
-import type { ActivityPhase, ConversationItem, SortMode } from './types.js';
+import type { ActivityPhase, ConversationItem, SortMode, StickyMode } from './types.js';
 
 export const QUESTION_OVERDUE_MS = 5 * 60 * 1000;
+
+export function resolveAlwaysOnTop(
+  stickyMode: StickyMode,
+  runningItems: ConversationItem[]
+): boolean {
+  if (stickyMode === 'always') return true;
+  if (stickyMode === 'off') return false;
+  return runningItems.some((item) => item.phase === 'waiting_input');
+}
 
 export function getQuestionWaitMs(item: ConversationItem, nowMs: number): number | null {
   if (item.phase !== 'waiting_input') return null;
@@ -36,24 +45,43 @@ export function sortConversations(
   nowMs: number
 ): ConversationItem[] {
   return [...items].sort((a, b) => {
+    // Unanswered questions always stay first regardless of selected sort mode,
+    // ordered by longest waiting time (overdue >5m naturally rises to the top).
+    const aIsQuestion = a.phase === 'waiting_input';
+    const bIsQuestion = b.phase === 'waiting_input';
+    if (aIsQuestion !== bIsQuestion) {
+      return aIsQuestion ? -1 : 1;
+    }
+    if (aIsQuestion && bIsQuestion) {
+      const aWait = getQuestionWaitMs(a, nowMs) ?? 0;
+      const bWait = getQuestionWaitMs(b, nowMs) ?? 0;
+      if (aWait !== bWait) return bWait - aWait;
+    }
+
     if (mode === 'action_needed') {
       const rankDiff = getActionRank(a, nowMs) - getActionRank(b, nowMs);
       if (rankDiff !== 0) return rankDiff;
 
-      if (a.phase === 'waiting_input' && b.phase === 'waiting_input') {
-        const aWait = getQuestionWaitMs(a, nowMs) ?? 0;
-        const bWait = getQuestionWaitMs(b, nowMs) ?? 0;
-        if (aWait !== bWait) return bWait - aWait;
-      }
-
-      const aStart = parseTimestampMs(a.lastUserInputAt) ?? Number.MAX_SAFE_INTEGER;
-      const bStart = parseTimestampMs(b.lastUserInputAt) ?? Number.MAX_SAFE_INTEGER;
+      const aStart =
+        parseTimestampMs(a.lastUserInputAt) ??
+        parseTimestampMs(a.startedAt) ??
+        Number.MAX_SAFE_INTEGER;
+      const bStart =
+        parseTimestampMs(b.lastUserInputAt) ??
+        parseTimestampMs(b.startedAt) ??
+        Number.MAX_SAFE_INTEGER;
       if (aStart !== bStart) return aStart - bStart;
     }
 
     if (mode === 'duration') {
-      const aStart = parseTimestampMs(a.lastUserInputAt) ?? Number.MAX_SAFE_INTEGER;
-      const bStart = parseTimestampMs(b.lastUserInputAt) ?? Number.MAX_SAFE_INTEGER;
+      const aStart =
+        parseTimestampMs(a.lastUserInputAt) ??
+        parseTimestampMs(a.startedAt) ??
+        Number.MAX_SAFE_INTEGER;
+      const bStart =
+        parseTimestampMs(b.lastUserInputAt) ??
+        parseTimestampMs(b.startedAt) ??
+        Number.MAX_SAFE_INTEGER;
       if (aStart !== bStart) return aStart - bStart;
     }
 

@@ -12,6 +12,7 @@ import {
 import {
   getQuestionWaitMs,
   isQuestionOverdue,
+  resolveAlwaysOnTop,
   sortConversations,
 } from '../dist-electron/shared/status.js';
 import {
@@ -393,5 +394,35 @@ describe('readMonitorSnapshot', () => {
       sorted.map((x) => x.conversationId),
       ['overdue-q', 'fresh-q', 'stalled-1', 'running-old']
     );
+
+    const oldChatRecentPrompt = {
+      ...makeItem('old-chat-recent-prompt', 'running', null, '2026-11-16T07:05:00.000Z'),
+      startedAt: '2026-11-16T04:00:00.000Z',
+    };
+
+    const durationSorted = sortConversations(
+      [runningOld, freshQ, stalled, overdueQ, oldChatRecentPrompt],
+      'duration',
+      nowMs
+    );
+    assert.deepEqual(
+      durationSorted.map((x) => x.conversationId),
+      ['overdue-q', 'fresh-q', 'running-old', 'stalled-1', 'old-chat-recent-prompt']
+    );
+
+    const activitySorted = sortConversations(
+      [runningOld, freshQ, stalled, overdueQ],
+      'activity',
+      nowMs
+    );
+    assert.deepEqual(
+      activitySorted.map((x) => x.conversationId),
+      ['overdue-q', 'fresh-q', 'stalled-1', 'running-old']
+    );
+
+    assert.equal(resolveAlwaysOnTop('on_question', [runningOld, stalled]), false);
+    assert.equal(resolveAlwaysOnTop('on_question', [runningOld, freshQ]), true);
+    assert.equal(resolveAlwaysOnTop('always', []), true);
+    assert.equal(resolveAlwaysOnTop('off', [overdueQ]), false);
   });
 });
