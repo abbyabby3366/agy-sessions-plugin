@@ -35,6 +35,8 @@ export interface ConversationItem {
   startedAt: string | null;
   lastUserInputAt: string | null;
   lastModifiedAt: string | null;
+  lastUserViewAt: string | null;
+  unread: boolean;
   lastStepType: string | null;
   lastStepStatus: string | null;
   lastToolName: string | null;
@@ -54,6 +56,7 @@ export interface SourceHealth {
 export interface MonitorSnapshot {
   capturedAt: string;
   running: ConversationItem[];
+  unread: ConversationItem[];
   recentIdle: ConversationItem[];
   sources: SourceHealth[];
 }
@@ -74,9 +77,32 @@ export interface ActionResult {
   error?: string;
 }
 
+export interface ModelPoolQuota {
+  weeklyRemainingPct: number;
+  weeklyResetAt: string | null;
+  fiveHourRemainingPct: number | null;
+  fiveHourResetAt: string | null;
+}
+
+export type QuotaState =
+  | { status: 'loading' }
+  | {
+      status: 'ok';
+      fetchedAt: string;
+      gemini: ModelPoolQuota;
+      thirdParty: ModelPoolQuota;
+    }
+  | {
+      status: 'error';
+      error: string;
+      fetchedAt: string;
+    };
+
 export interface StickyMonitorApi {
   getSnapshot: () => Promise<MonitorSnapshot>;
   onSnapshot: (callback: (snapshot: MonitorSnapshot) => void) => () => void;
+  getQuota: () => Promise<QuotaState>;
+  onQuotaChanged: (callback: (quota: QuotaState) => void) => () => void;
   getPreferences: () => Promise<WindowPreferences>;
   updatePreferences: (patch: Partial<WindowPreferences>) => Promise<WindowPreferences>;
   onPreferencesChanged: (callback: (prefs: WindowPreferences) => void) => () => void;
@@ -85,6 +111,9 @@ export interface StickyMonitorApi {
   closeWindow: () => Promise<void>;
   setContentHeight: (height: number) => Promise<void>;
   openPath: (targetPath: string) => Promise<ActionResult>;
+  openInIde: (workspacePath: string) => Promise<ActionResult>;
+  focusAntigravityApp: () => Promise<ActionResult>;
   revealFile: (targetPath: string) => Promise<ActionResult>;
   copyText: (text: string) => Promise<ActionResult>;
+  markUnreadRead: (conversationIds: string[]) => Promise<ActionResult>;
 }

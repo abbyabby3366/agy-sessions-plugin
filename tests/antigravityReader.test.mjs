@@ -103,6 +103,12 @@ function writeTranscript(rootDir, convId, lines) {
   );
 }
 
+function writeAnnotation(rootDir, convId, content) {
+  const annPath = path.join(rootDir, 'antigravity', 'annotations', `${convId}.pbtxt`);
+  fs.mkdirSync(path.dirname(annPath), { recursive: true });
+  fs.writeFileSync(annPath, content, 'utf-8');
+}
+
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
@@ -120,10 +126,12 @@ describe('time helpers', () => {
     assert.deepEqual(gmt8, { date: '16-11-26', time: '14:27:43' });
   });
 
-  it('returns null for invalid or missing timestamps instead of guessing', () => {
+  it('returns null for invalid, missing, or uninitialized sentinel timestamps instead of guessing', () => {
     assert.equal(parseTimestampMs(null), null);
     assert.equal(parseTimestampMs(''), null);
     assert.equal(parseTimestampMs('not-a-date'), null);
+    assert.equal(parseTimestampMs('1900-12-31 00:00:00+00:00'), null);
+    assert.equal(parseTimestampMs('0001-01-01T00:00:00Z'), null);
     assert.equal(formatDateTimeGMT8('invalid'), null);
   });
 
@@ -422,7 +430,126 @@ describe('readMonitorSnapshot', () => {
 
     assert.equal(resolveAlwaysOnTop('on_question', [runningOld, stalled]), false);
     assert.equal(resolveAlwaysOnTop('on_question', [runningOld, freshQ]), true);
+    assert.equal(resolveAlwaysOnTop('on_question', [], [{ ...runningOld, phase: 'idle', unread: true }]), true);
     assert.equal(resolveAlwaysOnTop('always', []), true);
-    assert.equal(resolveAlwaysOnTop('off', [overdueQ]), false);
+    assert.equal(resolveAlwaysOnTop('off', [overdueQ], [{ ...runningOld, phase: 'idle', unread: true }]), false);
+  });
+
+  it('detects finished unread conversations from annotations and excludes read, archived, and stale ones', () => {
+    const rootDir = createTempRoot();
+    const nowMs = Date.parse('2026-11-19T04:00:00.000Z');
+    const sec = (iso) => Math.floor(Date.parse(iso) / 1000);
+
+    createTestSummariesDb(path.join(rootDir, 'antigravity', 'conversation_summaries.db'), [
+      {
+        conversation_id: 'conv-unread-recent',
+        title: 'Finished Unread',
+        step_count: 10,
+        last_modified_time: '2026-11-19 03:50:00.0000000+00:00',
+        workspace_uris: '["file:///c%3A/Users/desmo/Desktop/agy-custom"]',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        not_fully_idle: 0,
+        last_user_input_time: '2026-11-19 03:45:00.0000000+00:00',
+      },
+      {
+        conversation_id: 'conv-read-recent',
+        title: 'Finished And Viewed',
+        step_count: 8,
+        last_modified_time: '2026-11-19 03:40:00.0000000+00:00',
+        workspace_uris: '["file:///c%3A/Users/desmo/Desktop/agy-custom"]',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        not_fully_idle: 0,
+        last_user_input_time: '2026-11-19 03:35:00.0000000+00:00',
+      },
+      {
+        conversation_id: 'conv-archived-unread',
+        title: 'Archived Unread',
+        step_count: 6,
+        last_modified_time: '2026-11-19 03:30:00.0000000+00:00',
+        workspace_uris: '["file:///c%3A/Users/desmo/Desktop/agy-custom"]',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        not_fully_idle: 0,
+        last_user_input_time: '2026-11-19 03:25:00.0000000+00:00',
+      },
+      {
+        conversation_id: 'conv-stale-unread',
+        title: 'Old Unread >30m',
+        step_count: 4,
+        last_modified_time: '2026-11-19 03:29:00.0000000+00:00',
+        workspace_uris: '["file:///c%3A/Users/desmo/Desktop/agy-custom"]',
+        status: 'CASCADE_RUN_STATUS_IDLE',
+        not_fully_idle: 0,
+        last_user_input_time: '2026-11-19 03:25:00.0000000+00:00',
+      },
+    ]);
+
+    writeAnnotation(
+      rootDir,
+      'conv-unread-recent',
+      `title:"Finished Unread" last_user_view_time:{seconds:${sec('2026-11-19T03:46:00.000Z')} nanos:0}`
+    );
+    writeAnnotation(
+      rootDir,
+      'conv-read-recent',
+      `title:"Finished And Viewed" last_user_view_time:{seconds:${sec('2026-11-19T03:41:00.000Z')} nanos:0}`
+    );
+    writeAnnotation(
+      rootDir,
+      'conv-archived-unread',
+      `title:"Archived Unread" archived:true last_user_view_time:{seconds:${sec('2026-11-19T03:26:00.000Z')} nanos:0}`
+    );
+    writeAnnotation(
+      rootDir,
+      'conv-stale-unread',
+      `title:"Old Unread >30m" last_user_view_time:{seconds:${sec('2026-11-19T03:26:00.000Z')} nanos:0}`
+    );
+
+    const snapshot = readMonitorSnapshot({
+      geminiRootDir: rootDir,
+      includeCli: false,
+      nowMs,
+    });
+
+    assert.deepEqual(
+      snapshot.unread.map((c) => c.conversationId),
+      ['conv-unread-recent']
+    );
+    assert.equal(snapshot.unread[0].unread, true);
+    assert.equal(snapshot.unread[0].lastUserViewAt, '2026-11-19T03:46:00.000Z');
+    assert.equal(
+      snapshot.recentIdle.some((c) => c.conversationId === 'conv-unread-recent'),
+      false
+    );
+    assert.equal(
+      snapshot.recentIdle.some((c) => c.conversationId === 'conv-read-recent'),
+      true
+    );
+
+    const dismissedSnap = readMonitorSnapshot({
+      geminiRootDir: rootDir,
+      includeCli: false,
+      nowMs,
+      dismissedUnread: {
+        'conv-unread-recent': Date.parse('2026-11-19T03:55:00.000Z'),
+      },
+    });
+    assert.equal(dismissedSnap.unread.length, 0);
+    assert.equal(
+      dismissedSnap.recentIdle.some((c) => c.conversationId === 'conv-unread-recent'),
+      true
+    );
+
+    const reUnreadSnap = readMonitorSnapshot({
+      geminiRootDir: rootDir,
+      includeCli: false,
+      nowMs,
+      dismissedUnread: {
+        'conv-unread-recent': Date.parse('2026-11-19T03:48:00.000Z'),
+      },
+    });
+    assert.deepEqual(
+      reUnreadSnap.unread.map((c) => c.conversationId),
+      ['conv-unread-recent']
+    );
   });
 });

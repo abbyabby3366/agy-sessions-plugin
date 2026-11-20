@@ -42,14 +42,29 @@ interface CachedTranscriptState {
   info: TranscriptTailInfo;
 }
 
+interface AnnotationInfo {
+  lastUserViewMs: number | null;
+  archived: boolean;
+}
+
+interface CachedAnnotationState {
+  mtimeMs: number;
+  size: number;
+  info: AnnotationInfo;
+}
+
 const STALL_THRESHOLD_MS = 10 * 60 * 1000;
 const MAX_RECENT_IDLE = 10;
+const MAX_IDLE_SCAN = 30;
+const UNREAD_GRACE_MS = 1000;
+const UNREAD_MAX_AGE_MS = 30 * 60 * 1000;
 const HEAD_READ_BYTES = 4096;
 const TAIL_READ_BYTES = 32768;
 const MAX_CACHE_ENTRIES = 250;
 
 const startedAtCache = new Map<string, string | null>();
 const tailCache = new Map<string, CachedTranscriptState>();
+const annotationCache = new Map<string, CachedAnnotationState>();
 
 function setBoundedCache<K, V>(map: Map<K, V>, key: K, value: V): void {
   if (map.size >= MAX_CACHE_ENTRIES && !map.has(key)) {
@@ -65,6 +80,7 @@ export interface ReaderOptions {
   geminiRootDir?: string;
   includeCli?: boolean;
   nowMs?: number;
+  dismissedUnread?: Record<string, number>;
 }
 
 export function getDefaultGeminiRootDir(): string {
@@ -285,6 +301,44 @@ export function readTranscriptTail(transcriptPath: string): TranscriptTailInfo |
   }
 }
 
+export function readAnnotationInfo(annotationPath: string): AnnotationInfo | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(annotationPath);
+  } catch {
+    return null;
+  }
+
+  const cached = annotationCache.get(annotationPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.info;
+  }
+
+  try {
+    const raw = fs.readFileSync(annotationPath, 'utf-8');
+    const archived = /\barchived\s*:\s*true\b/.test(raw);
+    const viewMatch = raw.match(
+      /last_user_view_time\s*:\s*\{\s*seconds\s*:\s*(\d+)(?:\s+nanos\s*:\s*(\d+))?\s*\}/
+    );
+    const lastUserViewMs = viewMatch
+      ? Number(viewMatch[1]) * 1000 + Math.floor(Number(viewMatch[2] ?? 0) / 1e6)
+      : null;
+
+    const info: AnnotationInfo = {
+      lastUserViewMs: lastUserViewMs !== null && Number.isFinite(lastUserViewMs) ? lastUserViewMs : null,
+      archived,
+    };
+    setBoundedCache(annotationCache, annotationPath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      info,
+    });
+    return info;
+  } catch {
+    return null;
+  }
+}
+
 export function classifyPhase(params: {
   status: string;
   notFullyIdle: number;
@@ -315,11 +369,18 @@ function readSource(
   label: string,
   dirPath: string,
   dbPath: string,
-  nowMs: number
-): { running: ConversationItem[]; recentIdle: ConversationItem[]; health: SourceHealth } {
+  nowMs: number,
+  dismissedUnread?: Record<string, number>
+): {
+  running: ConversationItem[];
+  unread: ConversationItem[];
+  recentIdle: ConversationItem[];
+  health: SourceHealth;
+} {
   if (!fs.existsSync(dbPath)) {
     return {
       running: [],
+      unread: [],
       recentIdle: [],
       health: {
         source,
@@ -378,7 +439,7 @@ function readSource(
          ORDER BY last_modified_time DESC
          LIMIT ?`
       )
-      .all(MAX_RECENT_IDLE) as unknown as RawSummaryRow[];
+      .all(MAX_IDLE_SCAN) as unknown as RawSummaryRow[];
 
     const seenIds = new Set<string>();
     const rows: RawSummaryRow[] = [];
@@ -442,6 +503,25 @@ function readSource(
         }
       }
 
+      const annotationPath = path.join(dirPath, 'annotations', `${row.conversation_id}.pbtxt`);
+      const annotation = row.nesting_depth === 0 ? readAnnotationInfo(annotationPath) : null;
+      const lastUserViewMs = annotation?.lastUserViewMs ?? null;
+      const lastUserViewAt = lastUserViewMs !== null ? new Date(lastUserViewMs).toISOString() : null;
+      const dismissedAtMs = dismissedUnread?.[row.conversation_id];
+      const isDismissed =
+        typeof dismissedAtMs === 'number' &&
+        lastModifiedMs !== null &&
+        lastModifiedMs <= dismissedAtMs;
+      const isUnread =
+        phase === 'idle' &&
+        !isDismissed &&
+        annotation !== null &&
+        !annotation.archived &&
+        lastUserViewMs !== null &&
+        lastModifiedMs !== null &&
+        lastModifiedMs - lastUserViewMs > UNREAD_GRACE_MS &&
+        nowMs - lastModifiedMs <= UNREAD_MAX_AGE_MS;
+
       const ws = parseWorkspaceUri(row.workspace_uris);
       const item: ConversationItem = {
         conversationId: row.conversation_id,
@@ -458,6 +538,8 @@ function readSource(
         startedAt: tail?.startedAt ? toIsoOrNull(tail.startedAt) : null,
         lastUserInputAt: toIsoOrNull(row.last_user_input_time),
         lastModifiedAt: effectiveModifiedIso,
+        lastUserViewAt,
+        unread: isUnread,
         lastStepType: tail?.lastStepType ?? null,
         lastStepStatus: tail?.lastStepStatus ?? null,
         lastToolName: tail?.lastToolName ?? null,
@@ -498,6 +580,8 @@ function readSource(
             startedAt: null,
             lastUserInputAt: child.lastUserInputAt,
             lastModifiedAt: child.lastModifiedAt,
+            lastUserViewAt: null,
+            unread: false,
             lastStepType: null,
             lastStepStatus: null,
             lastToolName: null,
@@ -511,12 +595,14 @@ function readSource(
 
     const all = [...topLevelItems, ...orphanRunningSubagents];
     const running = all.filter((item) => item.phase !== 'idle');
+    const unread = all.filter((item) => item.phase === 'idle' && item.unread);
     const recentIdle = all
-      .filter((item) => item.phase === 'idle')
+      .filter((item) => item.phase === 'idle' && !item.unread)
       .slice(0, MAX_RECENT_IDLE);
 
     return {
       running,
+      unread,
       recentIdle,
       health: { source, label, dbPath, ok: true, error: null },
     };
@@ -524,6 +610,7 @@ function readSource(
     const message = err instanceof Error ? err.message : String(err);
     return {
       running: [],
+      unread: [],
       recentIdle: [],
       health: { source, label, dbPath, ok: false, error: message },
     };
@@ -545,15 +632,30 @@ export function readMonitorSnapshot(options: ReaderOptions = {}): MonitorSnapsho
 
   const sourceConfigs = getSourceDirs(geminiRootDir, includeCli);
   const running: ConversationItem[] = [];
+  const unread: ConversationItem[] = [];
   const recentIdle: ConversationItem[] = [];
   const sources: SourceHealth[] = [];
 
   for (const cfg of sourceConfigs) {
-    const result = readSource(cfg.source, cfg.label, cfg.dirPath, cfg.dbPath, nowMs);
+    const result = readSource(
+      cfg.source,
+      cfg.label,
+      cfg.dirPath,
+      cfg.dbPath,
+      nowMs,
+      options.dismissedUnread
+    );
     running.push(...result.running);
+    unread.push(...result.unread);
     recentIdle.push(...result.recentIdle);
     sources.push(result.health);
   }
+
+  unread.sort((a, b) => {
+    const aMs = parseTimestampMs(a.lastModifiedAt) ?? 0;
+    const bMs = parseTimestampMs(b.lastModifiedAt) ?? 0;
+    return bMs - aMs;
+  });
 
   recentIdle.sort((a, b) => {
     const aMs = parseTimestampMs(a.lastModifiedAt) ?? 0;
@@ -564,6 +666,7 @@ export function readMonitorSnapshot(options: ReaderOptions = {}): MonitorSnapsho
   return {
     capturedAt: new Date(nowMs).toISOString(),
     running,
+    unread,
     recentIdle: recentIdle.slice(0, MAX_RECENT_IDLE),
     sources,
   };

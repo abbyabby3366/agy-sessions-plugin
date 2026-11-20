@@ -2,10 +2,11 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { isQuestionOverdue, sortConversations } from '../shared/status.js';
 import type {
   MonitorSnapshot,
+  QuotaState,
   WindowPreferences,
 } from '../shared/types.js';
 import { ConversationRow } from './components/ConversationRow.js';
-import { AlertIcon, ChevronRightIcon } from './components/Icons.js';
+import { AlertIcon, AntigravityAppIcon, ChevronRightIcon } from './components/Icons.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { TitleBar, type HeaderSeverity } from './components/TitleBar.js';
 
@@ -22,6 +23,7 @@ const INITIAL_PREFS: WindowPreferences = {
 
 export const App: React.FC = () => {
   const [snapshot, setSnapshot] = useState<MonitorSnapshot | null>(null);
+  const [quota, setQuota] = useState<QuotaState>({ status: 'loading' });
   const [preferences, setPreferences] = useState<WindowPreferences>(INITIAL_PREFS);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -89,10 +91,31 @@ export const App: React.FC = () => {
       setPreferences(prefs);
     });
 
+    void api
+      .getQuota()
+      .then((nextQuota) => {
+        if (active) setQuota(nextQuota);
+      })
+      .catch((err: unknown) => {
+        if (active) {
+          setQuota({
+            status: 'error',
+            error: err instanceof Error ? err.message : 'Failed to query model quota',
+            fetchedAt: new Date().toISOString(),
+          });
+        }
+      });
+
+    const unsubQuota = api.onQuotaChanged((nextQuota) => {
+      if (!active) return;
+      setQuota(nextQuota);
+    });
+
     return () => {
       active = false;
       unsubSnapshot();
       unsubPrefs();
+      unsubQuota();
     };
   }, []);
 
@@ -116,6 +139,22 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleOpenInIde = async (workspacePath: string) => {
+    setActionError(null);
+    const res = await window.stickyMonitor.openInIde(workspacePath);
+    if (!res.ok) {
+      setActionError(res.error ?? `Failed to open ${workspacePath} in Antigravity IDE`);
+    }
+  };
+
+  const handleFocusAntigravityApp = async () => {
+    setActionError(null);
+    const res = await window.stickyMonitor.focusAntigravityApp();
+    if (!res.ok) {
+      setActionError(res.error ?? 'Failed to focus Antigravity app');
+    }
+  };
+
   const handleRevealFile = async (targetPath: string) => {
     setActionError(null);
     const res = await window.stickyMonitor.revealFile(targetPath);
@@ -132,12 +171,23 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleMarkRead = async (conversationIds: string[]) => {
+    setActionError(null);
+    const res = await window.stickyMonitor.markUnreadRead(conversationIds);
+    if (!res.ok) {
+      setActionError(res.error ?? 'Failed to mark conversation as read');
+    }
+  };
+
   const sortMode = preferences.sortMode;
 
   const sortedRunning = useMemo(
     () => (snapshot ? sortConversations(snapshot.running, sortMode, nowMs) : []),
     [snapshot, sortMode, nowMs]
   );
+
+  const unreadItems = useMemo(() => snapshot?.unread ?? [], [snapshot]);
+  const unreadCount = unreadItems.length;
 
   const waitingCount = useMemo(
     () => sortedRunning.filter((c) => c.phase === 'waiting_input').length,
@@ -161,19 +211,26 @@ export const App: React.FC = () => {
         ? 'warning'
         : sortedRunning.length > 0
           ? 'running'
-          : 'idle';
+          : unreadCount > 0
+            ? 'unread'
+            : 'idle';
 
   const statusSummary = useMemo(() => {
-    if (sortedRunning.length === 0) return '0 active conversations';
+    if (sortedRunning.length === 0) {
+      return unreadCount > 0
+        ? `0 active, ${unreadCount} unread finished`
+        : '0 active conversations';
+    }
     const notes: string[] = [];
     if (overdueCount > 0) notes.push(`${overdueCount} overdue >5m`);
     const freshWaiting = waitingCount - overdueCount;
     if (freshWaiting > 0) notes.push(`${freshWaiting} waiting input`);
     if (stalledCount > 0) notes.push(`${stalledCount} stalled`);
+    if (unreadCount > 0) notes.push(`${unreadCount} unread`);
     return notes.length > 0
       ? `${sortedRunning.length} active (${notes.join(', ')})`
       : `${sortedRunning.length} active`;
-  }, [sortedRunning.length, overdueCount, waitingCount, stalledCount]);
+  }, [sortedRunning.length, unreadCount, overdueCount, waitingCount, stalledCount]);
 
   const failingSources = useMemo(
     () => (snapshot ? snapshot.sources.filter((s) => !s.ok) : []),
@@ -207,11 +264,13 @@ export const App: React.FC = () => {
     preferences.showIdleRecent,
     preferences.idleExpanded,
     sortedRunning.length,
+    unreadCount,
     snapshot?.recentIdle.length,
     expandedId,
     loadError,
     actionError,
     failingSources.length,
+    quota.status,
   ]);
 
   return (
@@ -220,6 +279,7 @@ export const App: React.FC = () => {
         runningCount={sortedRunning.length}
         severity={headerSeverity}
         statusSummary={statusSummary}
+        quota={quota}
         onOpenSettings={() => setSettingsOpen(true)}
         onMinimize={() => void window.stickyMonitor.minimizeWindow()}
         onClose={() => void window.stickyMonitor.closeWindow()}
@@ -233,6 +293,16 @@ export const App: React.FC = () => {
             <div className="error-banner-body">
               <span className="error-banner-title">Monitor Read Error</span>
               <span className="error-banner-detail">{loadError}</span>
+            </div>
+          </div>
+        )}
+
+        {quota.status === 'error' && (
+          <div className="error-banner" role="alert">
+            <AlertIcon />
+            <div className="error-banner-body">
+              <span className="error-banner-title">Quota Read Error</span>
+              <span className="error-banner-detail">{quota.error}</span>
             </div>
           </div>
         )}
@@ -261,6 +331,15 @@ export const App: React.FC = () => {
 
         <div className="section-header">
           <span>Active Runs</span>
+          <button
+            type="button"
+            className="section-action-btn"
+            aria-label="Focus Antigravity app"
+            title="Focus Antigravity App"
+            onClick={() => void handleFocusAntigravityApp()}
+          >
+            <AntigravityAppIcon />
+          </button>
         </div>
 
         {!snapshot && !loadError ? (
@@ -292,11 +371,57 @@ export const App: React.FC = () => {
                   setExpandedId((curr) => (curr === id ? null : id))
                 }
                 onOpenPath={handleOpenPath}
+                onOpenInIde={handleOpenInIde}
                 onRevealFile={handleRevealFile}
                 onCopyId={handleCopyId}
               />
             ))}
           </ul>
+        )}
+
+        {unreadItems.length > 0 && (
+          <>
+            <div className="section-header section-header-unread">
+              <span className="section-header-title">
+                <span>Unread Finished</span>
+                <span className="section-count-badge">{unreadItems.length}</span>
+              </span>
+              <button
+                type="button"
+                className="section-text-btn"
+                title="Mark all unread runs as read"
+                onClick={() =>
+                  void handleMarkRead(unreadItems.map((item) => item.conversationId))
+                }
+              >
+                Mark all read
+              </button>
+            </div>
+
+            <ul
+              className="conv-list"
+              role="list"
+              data-compact={preferences.compactMode}
+            >
+              {unreadItems.map((item) => (
+                <ConversationRow
+                  key={`unread:${item.source}:${item.conversationId}`}
+                  item={item}
+                  nowMs={nowMs}
+                  compact={preferences.compactMode}
+                  expanded={expandedId === item.conversationId}
+                  onToggleExpand={(id) =>
+                    setExpandedId((curr) => (curr === id ? null : id))
+                  }
+                  onOpenPath={handleOpenPath}
+                  onOpenInIde={handleOpenInIde}
+                  onRevealFile={handleRevealFile}
+                  onCopyId={handleCopyId}
+                  onMarkRead={(id) => handleMarkRead([id])}
+                />
+              ))}
+            </ul>
+          </>
         )}
 
         {preferences.showIdleRecent && snapshot && snapshot.recentIdle.length > 0 && (
@@ -332,6 +457,7 @@ export const App: React.FC = () => {
                       setExpandedId((curr) => (curr === id ? null : id))
                     }
                     onOpenPath={handleOpenPath}
+                    onOpenInIde={handleOpenInIde}
                     onRevealFile={handleRevealFile}
                     onCopyId={handleCopyId}
                   />

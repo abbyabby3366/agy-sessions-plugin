@@ -16,7 +16,12 @@ import {
   getSourceDirs,
   readMonitorSnapshot,
 } from './antigravityReader.js';
-import { isQuestionOverdue, resolveAlwaysOnTop } from '../shared/status.js';
+import {
+  isQuestionOverdue,
+  resolveAlwaysOnTop,
+  resolveStickyTransition,
+  type AutoReturnAction,
+} from '../shared/status.js';
 import {
   loadPersistedState,
   savePersistedState,
@@ -24,23 +29,33 @@ import {
   type WindowBounds,
 } from './preferences.js';
 import { createAppIcon, createTrayIcon, getAppIconPath } from './trayIcon.js';
-import type { ActionResult, MonitorSnapshot, WindowPreferences } from '../shared/types.js';
+import { launchAntigravityApp, launchAntigravityIde } from './ideLauncher.js';
+import { fetchModelQuota } from './quotaReader.js';
+import type { ActionResult, MonitorSnapshot, QuotaState, WindowPreferences } from '../shared/types.js';
 
 const POLL_INTERVAL_MS = 1500;
 const WATCH_DEBOUNCE_MS = 220;
+const QUOTA_POLL_INTERVAL_MS = 60_000;
+const QUOTA_RUN_COMPLETE_MIN_GAP_MS = 15_000;
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let persistedState: PersistedState;
 let stateFilePath = '';
 let pollTimer: NodeJS.Timeout | null = null;
+let quotaTimer: NodeJS.Timeout | null = null;
 let watchDebounceTimer: NodeJS.Timeout | null = null;
 let boundsDebounceTimer: NodeJS.Timeout | null = null;
 const activeWatchers: fs.FSWatcher[] = [];
 let lastSnapshotSignature = '';
 let lastTraySignature = '';
 let latestSnapshot: MonitorSnapshot | null = null;
+let latestQuota: QuotaState = { status: 'loading' };
+let quotaInFlight: Promise<QuotaState> | null = null;
+let lastQuotaFetchStartedMs = 0;
+let prevRunningIds = new Set<string>();
 let appliedAlwaysOnTop: boolean | null = null;
+let autoReturnAction: AutoReturnAction = null;
 let isProgrammaticHeightChange = false;
 
 function resolveRendererBackground(pref: WindowPreferences['themePreference']): string {
@@ -88,10 +103,24 @@ function persistStateNow(): void {
 }
 
 function scheduleBoundsSave(): void {
-  if (!mainWindow || mainWindow.isDestroyed() || isProgrammaticHeightChange) return;
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    isProgrammaticHeightChange ||
+    mainWindow.isMinimized()
+  ) {
+    return;
+  }
   if (boundsDebounceTimer) clearTimeout(boundsDebounceTimer);
   boundsDebounceTimer = setTimeout(() => {
-    if (!mainWindow || mainWindow.isDestroyed() || isProgrammaticHeightChange) return;
+    if (
+      !mainWindow ||
+      mainWindow.isDestroyed() ||
+      isProgrammaticHeightChange ||
+      mainWindow.isMinimized()
+    ) {
+      return;
+    }
     const b = mainWindow.getBounds();
     persistedState.bounds = {
       x: b.x,
@@ -107,26 +136,36 @@ function updateTrayStatus(snapshot: MonitorSnapshot): void {
   if (!tray) return;
   const nowMs = Date.now();
   const runningCount = snapshot.running.length;
+  const unreadCount = snapshot.unread.length;
   const waitingCount = snapshot.running.filter((c) => c.phase === 'waiting_input').length;
   const stalledCount = snapshot.running.filter((c) => c.phase === 'stalled').length;
   const overdueCount = snapshot.running.filter((c) => isQuestionOverdue(c, nowMs)).length;
-  const sig = `${runningCount}:${waitingCount}:${stalledCount}:${overdueCount}`;
+  const sig = `${runningCount}:${unreadCount}:${waitingCount}:${stalledCount}:${overdueCount}`;
 
   if (sig !== lastTraySignature) {
     lastTraySignature = sig;
     tray.setImage(
-      createTrayIcon(runningCount > 0, waitingCount > 0 || stalledCount > 0, overdueCount > 0)
+      createTrayIcon(
+        runningCount > 0,
+        waitingCount > 0 || stalledCount > 0 || unreadCount > 0,
+        overdueCount > 0
+      )
     );
+    const unreadSuffix = unreadCount > 0 ? `, ${unreadCount} unread` : '';
     const tooltip =
       runningCount === 0
-        ? 'Antigravity Sessions — Idle'
+        ? unreadCount > 0
+          ? `Antigravity Sessions — ${unreadCount} unread finished`
+          : 'Antigravity Sessions — Idle'
         : overdueCount > 0
-          ? `Antigravity Sessions — ${runningCount} active (${overdueCount} question >5m!)`
+          ? `Antigravity Sessions — ${runningCount} active (${overdueCount} question >5m!${unreadSuffix})`
           : waitingCount > 0
-            ? `Antigravity Sessions — ${runningCount} active (${waitingCount} waiting input)`
+            ? `Antigravity Sessions — ${runningCount} active (${waitingCount} waiting input${unreadSuffix})`
             : stalledCount > 0
-              ? `Antigravity Sessions — ${runningCount} active (${stalledCount} stalled)`
-              : `Antigravity Sessions — ${runningCount} active`;
+              ? `Antigravity Sessions — ${runningCount} active (${stalledCount} stalled${unreadSuffix})`
+              : unreadCount > 0
+                ? `Antigravity Sessions — ${runningCount} active, ${unreadCount} unread`
+                : `Antigravity Sessions — ${runningCount} active`;
     tray.setToolTip(tooltip);
   }
 }
@@ -134,28 +173,114 @@ function updateTrayStatus(snapshot: MonitorSnapshot): void {
 function computeSnapshot(): MonitorSnapshot {
   return readMonitorSnapshot({
     includeCli: persistedState.preferences.includeCli,
+    dismissedUnread: persistedState.dismissedUnread,
   });
 }
 
 function buildSignature(snapshot: MonitorSnapshot): string {
   return JSON.stringify({
     running: snapshot.running,
+    unread: snapshot.unread,
     recentIdle: snapshot.recentIdle,
     sources: snapshot.sources,
   });
 }
 
-function syncStickyOnTop(prefs: WindowPreferences, snapshot: MonitorSnapshot | null): void {
+function syncStickyOnTop(
+  prefs: WindowPreferences,
+  snapshot: MonitorSnapshot | null,
+  options?: { isPreferenceChange?: boolean }
+): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const shouldBeOnTop = snapshot
-    ? resolveAlwaysOnTop(prefs.stickyMode, snapshot.running)
+  const nextOnTop = snapshot
+    ? resolveAlwaysOnTop(prefs.stickyMode, snapshot.running, snapshot.unread)
     : prefs.stickyMode === 'always';
 
-  if (appliedAlwaysOnTop !== shouldBeOnTop) {
-    appliedAlwaysOnTop = shouldBeOnTop;
-    mainWindow.setAlwaysOnTop(shouldBeOnTop, 'floating');
-    mainWindow.setVisibleOnAllWorkspaces(shouldBeOnTop, { visibleOnFullScreen: true });
+  const effect = resolveStickyTransition({
+    stickyMode: prefs.stickyMode,
+    prevOnTop: appliedAlwaysOnTop,
+    nextOnTop,
+    prevAutoReturn: autoReturnAction,
+    windowState: {
+      isVisible: mainWindow.isVisible(),
+      isMinimized: mainWindow.isMinimized(),
+      isFocused: mainWindow.isFocused(),
+    },
+    isPreferenceChange: options?.isPreferenceChange === true,
+  });
+
+  autoReturnAction = effect.nextAutoReturn;
+  if (effect.setAlwaysOnTop !== null) {
+    appliedAlwaysOnTop = effect.setAlwaysOnTop;
   }
+
+  switch (effect.windowAction) {
+    case 'show_inactive':
+    case 'restore_inactive':
+      mainWindow.showInactive();
+      if (effect.setAlwaysOnTop !== null) {
+        mainWindow.setAlwaysOnTop(effect.setAlwaysOnTop, 'floating');
+        mainWindow.setVisibleOnAllWorkspaces(effect.setAlwaysOnTop, {
+          visibleOnFullScreen: true,
+        });
+      }
+      mainWindow.moveTop();
+      rebuildTrayMenu();
+      break;
+    case 'move_top':
+      if (effect.setAlwaysOnTop !== null) {
+        mainWindow.setAlwaysOnTop(effect.setAlwaysOnTop, 'floating');
+        mainWindow.setVisibleOnAllWorkspaces(effect.setAlwaysOnTop, {
+          visibleOnFullScreen: true,
+        });
+      }
+      mainWindow.moveTop();
+      break;
+    case 'minimize':
+      if (effect.setAlwaysOnTop !== null) {
+        mainWindow.setAlwaysOnTop(effect.setAlwaysOnTop, 'floating');
+        mainWindow.setVisibleOnAllWorkspaces(effect.setAlwaysOnTop, {
+          visibleOnFullScreen: true,
+        });
+      }
+      mainWindow.minimize();
+      break;
+    case 'hide':
+      if (effect.setAlwaysOnTop !== null) {
+        mainWindow.setAlwaysOnTop(effect.setAlwaysOnTop, 'floating');
+        mainWindow.setVisibleOnAllWorkspaces(effect.setAlwaysOnTop, {
+          visibleOnFullScreen: true,
+        });
+      }
+      mainWindow.hide();
+      rebuildTrayMenu();
+      break;
+    case 'none':
+      if (effect.setAlwaysOnTop !== null) {
+        mainWindow.setAlwaysOnTop(effect.setAlwaysOnTop, 'floating');
+        mainWindow.setVisibleOnAllWorkspaces(effect.setAlwaysOnTop, {
+          visibleOnFullScreen: true,
+        });
+      }
+      break;
+  }
+}
+
+function refreshQuota(): Promise<QuotaState> {
+  if (quotaInFlight) return quotaInFlight;
+  lastQuotaFetchStartedMs = Date.now();
+  quotaInFlight = fetchModelQuota()
+    .then((nextQuota) => {
+      latestQuota = nextQuota;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('quota:snapshot', nextQuota);
+      }
+      return nextQuota;
+    })
+    .finally(() => {
+      quotaInFlight = null;
+    });
+  return quotaInFlight;
 }
 
 function pushSnapshot(force = false): MonitorSnapshot {
@@ -163,6 +288,23 @@ function pushSnapshot(force = false): MonitorSnapshot {
   latestSnapshot = snapshot;
   updateTrayStatus(snapshot);
   syncStickyOnTop(persistedState.preferences, snapshot);
+
+  const currIds = new Set(snapshot.running.map((c) => c.conversationId));
+  let finishedRun = false;
+  for (const prevId of prevRunningIds) {
+    if (!currIds.has(prevId)) {
+      finishedRun = true;
+      break;
+    }
+  }
+  prevRunningIds = currIds;
+  if (
+    finishedRun &&
+    !quotaInFlight &&
+    Date.now() - lastQuotaFetchStartedMs >= QUOTA_RUN_COMPLETE_MIN_GAP_MS
+  ) {
+    void refreshQuota();
+  }
 
   const signature = buildSignature(snapshot);
   if (force || signature !== lastSnapshotSignature) {
@@ -190,23 +332,38 @@ function setupWatchers(): void {
   const rootDir = getDefaultGeminiRootDir();
   const sources = getSourceDirs(rootDir, persistedState.preferences.includeCli);
 
+  const schedulePush = () => {
+    if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+    watchDebounceTimer = setTimeout(() => {
+      pushSnapshot(false);
+    }, WATCH_DEBOUNCE_MS);
+  };
+
   for (const src of sources) {
     if (!fs.existsSync(src.dirPath)) continue;
     try {
       const watcher = fs.watch(src.dirPath, (_eventType, filename) => {
-        if (
-          !filename ||
-          filename.startsWith('conversation_summaries.db')
-        ) {
-          if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
-          watchDebounceTimer = setTimeout(() => {
-            pushSnapshot(false);
-          }, WATCH_DEBOUNCE_MS);
+        if (!filename || filename.startsWith('conversation_summaries.db')) {
+          schedulePush();
         }
       });
       activeWatchers.push(watcher);
     } catch (err) {
       console.error(`[sticky-monitor] Watch error for ${src.dirPath}:`, err);
+    }
+
+    const annotationsDir = path.join(src.dirPath, 'annotations');
+    if (fs.existsSync(annotationsDir)) {
+      try {
+        const annWatcher = fs.watch(annotationsDir, (_eventType, filename) => {
+          if (!filename || filename.endsWith('.pbtxt')) {
+            schedulePush();
+          }
+        });
+        activeWatchers.push(annWatcher);
+      } catch (err) {
+        console.error(`[sticky-monitor] Watch error for ${annotationsDir}:`, err);
+      }
     }
   }
 }
@@ -215,7 +372,7 @@ function applyPreferencesToWindow(prefs: WindowPreferences): void {
   nativeTheme.themeSource = prefs.themePreference;
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  syncStickyOnTop(prefs, latestSnapshot);
+  syncStickyOnTop(prefs, latestSnapshot, { isPreferenceChange: true });
   mainWindow.setOpacity(prefs.opacity);
   mainWindow.setBackgroundColor(resolveRendererBackground(prefs.themePreference));
 }
@@ -243,7 +400,7 @@ function rebuildTrayMenu(): void {
       label: 'Sticky on Top',
       submenu: [
         {
-          label: 'Only on Question',
+          label: 'Question or Unread',
           type: 'radio',
           checked: prefs.stickyMode === 'on_question',
           click: () => setSticky('on_question'),
@@ -331,7 +488,8 @@ function createWindow(): void {
   if (!appIcon.isEmpty()) {
     mainWindow.setIcon(appIcon);
   }
-  appliedAlwaysOnTop = initialOnTop;
+  appliedAlwaysOnTop = null;
+  autoReturnAction = null;
   mainWindow.setAlwaysOnTop(initialOnTop, 'floating');
   mainWindow.setVisibleOnAllWorkspaces(initialOnTop, { visibleOnFullScreen: true });
 
@@ -359,11 +517,14 @@ function setupIpc(): void {
   ipcMain.handle('monitor:get-snapshot', () => {
     const snapshot = computeSnapshot();
     latestSnapshot = snapshot;
+    prevRunningIds = new Set(snapshot.running.map((c) => c.conversationId));
     updateTrayStatus(snapshot);
     syncStickyOnTop(persistedState.preferences, snapshot);
     lastSnapshotSignature = buildSignature(snapshot);
     return snapshot;
   });
+
+  ipcMain.handle('quota:get', () => latestQuota);
 
   ipcMain.handle('prefs:get', () => persistedState.preferences);
 
@@ -403,7 +564,7 @@ function setupIpc(): void {
   });
 
   ipcMain.handle('window:set-content-height', (_event, desiredHeight: number) => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) return;
     if (!Number.isFinite(desiredHeight)) return;
     const bounds = mainWindow.getBounds();
     const display = screen.getDisplayMatching(bounds);
@@ -445,6 +606,13 @@ function setupIpc(): void {
     return { ok: true };
   });
 
+  ipcMain.handle(
+    'ide:open-workspace',
+    (_event, workspacePath: string): Promise<ActionResult> => launchAntigravityIde(workspacePath)
+  );
+
+  ipcMain.handle('app:focus-antigravity', (): Promise<ActionResult> => launchAntigravityApp());
+
   ipcMain.handle('shell:reveal-file', (_event, targetPath: string): ActionResult => {
     if (!targetPath || !fs.existsSync(targetPath)) {
       return { ok: false, error: `File does not exist: ${targetPath}` };
@@ -461,6 +629,36 @@ function setupIpc(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  ipcMain.handle(
+    'monitor:mark-unread-read',
+    (_event, conversationIds: string[]): ActionResult => {
+      try {
+        if (!Array.isArray(conversationIds) || conversationIds.length === 0) {
+          return { ok: true };
+        }
+        const now = Date.now();
+        const cutoff = now - 2 * 60 * 60 * 1000;
+        const nextDismissed: Record<string, number> = {};
+        for (const [id, ts] of Object.entries(persistedState.dismissedUnread ?? {})) {
+          if (ts > cutoff) {
+            nextDismissed[id] = ts;
+          }
+        }
+        for (const id of conversationIds) {
+          if (typeof id === 'string' && id.trim().length > 0) {
+            nextDismissed[id] = now;
+          }
+        }
+        persistedState.dismissedUnread = nextDismissed;
+        persistStateNow();
+        pushSnapshot(true);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
 }
 
 if (process.platform === 'win32') {
@@ -492,9 +690,13 @@ if (!gotSingleInstanceLock) {
     rebuildTrayMenu();
 
     setupWatchers();
+    void refreshQuota();
     pollTimer = setInterval(() => {
       pushSnapshot(false);
     }, POLL_INTERVAL_MS);
+    quotaTimer = setInterval(() => {
+      void refreshQuota();
+    }, QUOTA_POLL_INTERVAL_MS);
 
     nativeTheme.on('updated', () => {
       if (persistedState.preferences.themePreference === 'system') {
@@ -505,10 +707,11 @@ if (!gotSingleInstanceLock) {
 
   app.on('before-quit', () => {
     if (pollTimer) clearInterval(pollTimer);
+    if (quotaTimer) clearInterval(quotaTimer);
     if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
     if (boundsDebounceTimer) clearTimeout(boundsDebounceTimer);
     closeWatchers();
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMinimized()) {
       const b = mainWindow.getBounds();
       persistedState.bounds = { x: b.x, y: b.y, width: b.width, height: b.height };
       persistStateNow();

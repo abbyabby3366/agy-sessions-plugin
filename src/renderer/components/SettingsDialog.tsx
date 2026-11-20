@@ -17,7 +17,7 @@ const SORT_OPTIONS: Array<{ value: SortMode; label: string }> = [
 ];
 
 const STICKY_OPTIONS: Array<{ value: StickyMode; label: string }> = [
-  { value: 'on_question', label: 'Question' },
+  { value: 'on_question', label: 'Alerts' },
   { value: 'always', label: 'Always' },
   { value: 'off', label: 'Off' },
 ];
@@ -94,7 +94,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
         <div className="setting-row">
           <div>
             <span className="setting-label">Sticky on Top</span>
-            <span className="setting-hint">Pin above other apps</span>
+            <span className="setting-hint">Pin on questions or unread</span>
           </div>
           <div className="segmented-group" role="group" aria-label="Sticky on top mode">
             {STICKY_OPTIONS.map((opt) => (

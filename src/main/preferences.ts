@@ -13,6 +13,7 @@ export interface PersistedState {
   version?: number;
   preferences: WindowPreferences;
   bounds: WindowBounds;
+  dismissedUnread?: Record<string, number>;
 }
 
 const CURRENT_STATE_VERSION = 5;
@@ -93,12 +94,25 @@ function sanitizeBounds(raw: unknown): WindowBounds {
   return bounds;
 }
 
+function sanitizeDismissedUnread(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const out: Record<string, number> = {};
+  for (const [id, ts] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof ts === 'number' && Number.isFinite(ts) && ts > cutoff) {
+      out[id] = ts;
+    }
+  }
+  return out;
+}
+
 export function loadPersistedState(stateFilePath: string): PersistedState {
   if (!fs.existsSync(stateFilePath)) {
     return {
       version: CURRENT_STATE_VERSION,
       preferences: { ...DEFAULT_PREFERENCES },
       bounds: { ...DEFAULT_BOUNDS },
+      dismissedUnread: {},
     };
   }
 
@@ -122,6 +136,7 @@ export function loadPersistedState(stateFilePath: string): PersistedState {
       version: CURRENT_STATE_VERSION,
       preferences,
       bounds: sanitizeBounds(raw.bounds),
+      dismissedUnread: sanitizeDismissedUnread(raw.dismissedUnread),
     };
   } catch (err) {
     console.error('[sticky-monitor] Failed to parse saved window state:', err);
@@ -129,6 +144,7 @@ export function loadPersistedState(stateFilePath: string): PersistedState {
       version: CURRENT_STATE_VERSION,
       preferences: { ...DEFAULT_PREFERENCES },
       bounds: { ...DEFAULT_BOUNDS },
+      dismissedUnread: {},
     };
   }
 }

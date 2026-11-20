@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   ActionResult,
   MonitorSnapshot,
+  QuotaState,
   StickyMonitorApi,
   WindowPreferences,
 } from '../shared/types.js';
@@ -15,6 +16,16 @@ const api: StickyMonitorApi = {
     ipcRenderer.on('monitor:snapshot', listener);
     return () => {
       ipcRenderer.removeListener('monitor:snapshot', listener);
+    };
+  },
+  getQuota: (): Promise<QuotaState> => ipcRenderer.invoke('quota:get'),
+  onQuotaChanged: (callback: (quota: QuotaState) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: QuotaState) => {
+      callback(payload);
+    };
+    ipcRenderer.on('quota:snapshot', listener);
+    return () => {
+      ipcRenderer.removeListener('quota:snapshot', listener);
     };
   },
   getPreferences: (): Promise<WindowPreferences> => ipcRenderer.invoke('prefs:get'),
@@ -36,10 +47,16 @@ const api: StickyMonitorApi = {
     ipcRenderer.invoke('window:set-content-height', height),
   openPath: (targetPath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('shell:open-path', targetPath),
+  openInIde: (workspacePath: string): Promise<ActionResult> =>
+    ipcRenderer.invoke('ide:open-workspace', workspacePath),
+  focusAntigravityApp: (): Promise<ActionResult> =>
+    ipcRenderer.invoke('app:focus-antigravity'),
   revealFile: (targetPath: string): Promise<ActionResult> =>
     ipcRenderer.invoke('shell:reveal-file', targetPath),
   copyText: (text: string): Promise<ActionResult> =>
     ipcRenderer.invoke('clipboard:write', text),
+  markUnreadRead: (conversationIds: string[]): Promise<ActionResult> =>
+    ipcRenderer.invoke('monitor:mark-unread-read', conversationIds),
 };
 
 contextBridge.exposeInMainWorld('stickyMonitor', api);

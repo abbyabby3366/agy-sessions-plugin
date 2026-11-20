@@ -1,4 +1,5 @@
 const GMT8_OFFSET_MS = 8 * 60 * 60 * 1000;
+const MIN_VALID_EPOCH_MS = Date.UTC(2020, 0, 1);
 
 /**
  * Parses Antigravity timestamps (e.g. "2026-11-16 06:27:43.7794974+00:00" or ISO 8601)
@@ -16,7 +17,7 @@ export function parseTimestampMs(raw: string | null | undefined): number | null 
 
   if (!match) {
     const parsed = Date.parse(trimmed);
-    return Number.isFinite(parsed) ? parsed : null;
+    return Number.isFinite(parsed) && parsed >= MIN_VALID_EPOCH_MS ? parsed : null;
   }
 
   const [, y, m, d, hh, mm, ss, frac = '', tz = 'Z'] = match;
@@ -32,14 +33,15 @@ export function parseTimestampMs(raw: string | null | undefined): number | null 
   );
 
   if (tz.toUpperCase() === 'Z') {
-    return utcBase;
+    return utcBase >= MIN_VALID_EPOCH_MS ? utcBase : null;
   }
 
   const tzMatch = /^([+-])(\d{2}):?(\d{2})$/.exec(tz);
   if (!tzMatch) return null;
   const sign = tzMatch[1] === '+' ? 1 : -1;
   const offsetMinutes = Number(tzMatch[2]) * 60 + Number(tzMatch[3]);
-  return utcBase - sign * offsetMinutes * 60 * 1000;
+  const epochMs = utcBase - sign * offsetMinutes * 60 * 1000;
+  return epochMs >= MIN_VALID_EPOCH_MS ? epochMs : null;
 }
 
 /**

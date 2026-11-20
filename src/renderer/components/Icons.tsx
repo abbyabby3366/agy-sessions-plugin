@@ -294,3 +294,52 @@ export const FileTextIcon: React.FC<IconProps> = ({ size = 12, className }) => (
     <path d="M16 17H8" />
   </svg>
 );
+
+export const OpenIdeIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    className={className}
+  >
+    <path d="M15 3h6v6" />
+    <path d="M10 14 21 3" />
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </svg>
+);
+
+export const AntigravityAppIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    aria-hidden="true"
+    className={className}
+  >
+    <path d="M12 3.2c1.65 0 2.75 1.35 3.85 3.95 1.15 2.72 2.45 6.85 4.45 10.6.42.78.2 1.65-.45 2.05-.65.4-1.52.2-2.08-.42-1.85-2.05-3.45-4.38-5.77-4.38s-3.92 2.33-5.77 4.38c-.56.62-1.43.82-2.08.42-.65-.4-.87-1.27-.45-2.05 2-3.75 3.3-7.88 4.45-10.6C9.25 4.55 10.35 3.2 12 3.2Z" />
+  </svg>
+);
+
+export const CheckIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2.2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    className={className}
+  >
+    <path d="M20 6 9 17l-5-5" />
+  </svg>
+);

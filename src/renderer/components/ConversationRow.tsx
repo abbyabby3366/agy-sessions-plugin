@@ -6,7 +6,7 @@ import {
   parseTimestampMs,
 } from '../../shared/time.js';
 import type { ActivityPhase, ConversationItem } from '../../shared/types.js';
-import { CopyIcon, FileTextIcon, FolderIcon, StatusGlyph } from './Icons.js';
+import { CheckIcon, CopyIcon, FileTextIcon, FolderIcon, OpenIdeIcon, StatusGlyph } from './Icons.js';
 
 interface ConversationRowProps {
   item: ConversationItem;
@@ -15,8 +15,10 @@ interface ConversationRowProps {
   expanded: boolean;
   onToggleExpand: (conversationId: string) => void;
   onOpenPath: (targetPath: string) => Promise<void>;
+  onOpenInIde: (workspacePath: string) => Promise<void>;
   onRevealFile: (targetPath: string) => Promise<void>;
   onCopyId: (conversationId: string) => Promise<void>;
+  onMarkRead?: (conversationId: string) => Promise<void>;
 }
 
 const PHASE_LABEL: Record<ActivityPhase, string> = {
@@ -65,8 +67,10 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
   expanded,
   onToggleExpand,
   onOpenPath,
+  onOpenInIde,
   onRevealFile,
   onCopyId,
+  onMarkRead,
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -126,58 +130,105 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
       data-expanded={expanded}
       data-phase={item.phase}
       data-overdue={overdueQuestion}
+      data-unread={item.unread}
     >
-      <button
-        type="button"
-        className="conv-trigger"
-        aria-expanded={expanded}
-        onClick={() => onToggleExpand(item.conversationId)}
-      >
-        <div className="conv-top-row">
-          <div className="conv-workspace-wrap">
-            <span
-              className="status-indicator"
-              data-phase={item.phase}
-              data-overdue={overdueQuestion}
-            >
-              <StatusGlyph phase={item.phase} />
-            </span>
-            <span className="workspace-name">{workspaceLabel}</span>
-            {item.source === 'cli' && <span className="source-tag">CLI</span>}
-            {!compact && (
+      <div className="conv-row-shell">
+        <button
+          type="button"
+          className="conv-trigger"
+          aria-expanded={expanded}
+          onClick={() => onToggleExpand(item.conversationId)}
+        >
+          <div className="conv-top-row">
+            <div className="conv-workspace-wrap">
               <span
-                className="phase-tag"
+                className="status-indicator"
                 data-phase={item.phase}
                 data-overdue={overdueQuestion}
+                data-unread={item.unread}
               >
-                {overdueQuestion ? 'No Reply >5m' : PHASE_LABEL[item.phase]}
+                <StatusGlyph phase={item.phase} />
               </span>
-            )}
-            {compact && item.title && (
-              <span className="compact-title">— {item.title}</span>
-            )}
-          </div>
+              <span className="workspace-name">{workspaceLabel}</span>
+              {item.source === 'cli' && <span className="source-tag">CLI</span>}
+              {!compact && (
+                <span
+                  className="phase-tag"
+                  data-phase={item.phase}
+                  data-overdue={overdueQuestion}
+                  data-unread={item.unread}
+                >
+                  {overdueQuestion
+                    ? 'No Reply >5m'
+                    : item.unread
+                      ? 'Unread'
+                      : PHASE_LABEL[item.phase]}
+                </span>
+              )}
+              {compact && item.title && (
+                <span className="compact-title">— {item.title}</span>
+              )}
+            </div>
 
-          <span
-            className="elapsed-timer"
-            data-phase={item.phase}
-            data-overdue={overdueQuestion}
-            data-long={isLongRun}
-            aria-label={`Elapsed since last prompt ${elapsedText}`}
-          >
-            {elapsedText}
-          </span>
-        </div>
-
-        {!compact && (
-          <div className="conv-sub-row">
-            <span className="conv-title" data-missing={!item.title}>
-              {item.title ?? `Pending title (${item.conversationId.slice(0, 8)})…`}
+            <span
+              className="elapsed-timer"
+              data-phase={item.phase}
+              data-overdue={overdueQuestion}
+              data-unread={item.unread}
+              data-long={isLongRun}
+              aria-label={`Elapsed since last prompt ${elapsedText}`}
+            >
+              {elapsedText}
             </span>
-            {stepSummary && <span className="conv-meta-inline">{stepSummary}</span>}
           </div>
-        )}
-      </button>
+
+          {!compact && (
+            <div className="conv-sub-row">
+              <span className="conv-title" data-missing={!item.title}>
+                {item.title ?? `Pending title (${item.conversationId.slice(0, 8)})…`}
+              </span>
+              {stepSummary && <span className="conv-meta-inline">{stepSummary}</span>}
+            </div>
+          )}
+        </button>
+
+        <div className="row-actions">
+          {item.unread && onMarkRead && (
+            <button
+              type="button"
+              className="row-ide-btn row-read-btn"
+              aria-label={`Mark ${workspaceLabel} as read`}
+              title="Mark as read"
+              onClick={() => void onMarkRead(item.conversationId)}
+            >
+              <CheckIcon size={13} />
+            </button>
+          )}
+
+          <button
+            type="button"
+            className="row-ide-btn"
+            disabled={!item.workspacePath}
+            aria-label={
+              item.workspacePath
+                ? `Open ${workspaceLabel} in Antigravity IDE`
+                : `No workspace attached to ${workspaceLabel}`
+            }
+            title={
+              item.workspacePath
+                ? `Open ${workspaceLabel} in Antigravity IDE`
+                : 'No workspace folder attached'
+            }
+            onClick={() => {
+              if (item.workspacePath) {
+                void onOpenInIde(item.workspacePath);
+              }
+            }}
+          >
+            <OpenIdeIcon />
+          </button>
+        </div>
+      </div>
 
       {expanded && (
         <div className="conv-details">
@@ -227,6 +278,14 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
                   <StackedDateTime raw={item.lastModifiedAt} />
                 </td>
               </tr>
+              {item.lastUserViewAt && (
+                <tr>
+                  <th scope="row">Last Viewed</th>
+                  <td>
+                    <StackedDateTime raw={item.lastUserViewAt} />
+                  </td>
+                </tr>
+              )}
               {item.startedAt && (
                 <tr>
                   <th scope="row">Chat Created</th>
@@ -275,9 +334,34 @@ export const ConversationRow: React.FC<ConversationRowProps> = ({
           </table>
 
           <div className="detail-actions">
+            {item.unread && onMarkRead && (
+              <button
+                type="button"
+                className="action-btn"
+                onClick={() => void onMarkRead(item.conversationId)}
+              >
+                <CheckIcon size={12} />
+                Mark Read
+              </button>
+            )}
+
             <button type="button" className="action-btn" onClick={() => void handleCopy()}>
               <CopyIcon />
               {copied ? 'Copied ID' : 'Copy ID'}
+            </button>
+
+            <button
+              type="button"
+              className="action-btn"
+              disabled={!item.workspacePath}
+              onClick={() => {
+                if (item.workspacePath) {
+                  void onOpenInIde(item.workspacePath);
+                }
+              }}
+            >
+              <OpenIdeIcon size={12} />
+              Open IDE
             </button>
 
             <button

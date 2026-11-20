@@ -5,11 +5,130 @@ export const QUESTION_OVERDUE_MS = 5 * 60 * 1000;
 
 export function resolveAlwaysOnTop(
   stickyMode: StickyMode,
-  runningItems: ConversationItem[]
+  runningItems: ConversationItem[],
+  unreadItems: ConversationItem[] = []
 ): boolean {
   if (stickyMode === 'always') return true;
   if (stickyMode === 'off') return false;
-  return runningItems.some((item) => item.phase === 'waiting_input');
+  return (
+    runningItems.some((item) => item.phase === 'waiting_input') ||
+    unreadItems.length > 0
+  );
+}
+
+export type AutoReturnAction = 'minimize' | 'hide' | null;
+
+export interface StickyWindowState {
+  isVisible: boolean;
+  isMinimized: boolean;
+  isFocused: boolean;
+}
+
+export interface StickyTransitionInput {
+  stickyMode: StickyMode;
+  prevOnTop: boolean | null;
+  nextOnTop: boolean;
+  prevAutoReturn: AutoReturnAction;
+  windowState: StickyWindowState;
+  isPreferenceChange: boolean;
+}
+
+export interface StickyTransitionEffect {
+  setAlwaysOnTop: boolean | null;
+  windowAction: 'none' | 'show_inactive' | 'restore_inactive' | 'move_top' | 'minimize' | 'hide';
+  nextAutoReturn: AutoReturnAction;
+}
+
+export function resolveStickyTransition(input: StickyTransitionInput): StickyTransitionEffect {
+  const {
+    stickyMode,
+    prevOnTop,
+    nextOnTop,
+    prevAutoReturn,
+    windowState,
+    isPreferenceChange,
+  } = input;
+
+  // Initial sync before any snapshot has been processed: apply always-on-top only.
+  if (prevOnTop === null) {
+    return {
+      setAlwaysOnTop: nextOnTop,
+      windowAction: 'none',
+      nextAutoReturn: null,
+    };
+  }
+
+  // No change in sticky state.
+  if (prevOnTop === nextOnTop) {
+    return {
+      setAlwaysOnTop: null,
+      windowAction: 'none',
+      nextAutoReturn: stickyMode === 'on_question' && nextOnTop ? prevAutoReturn : null,
+    };
+  }
+
+  // Preference changes (e.g. toggling Sticky Mode in Settings/Tray) should only
+  // update always-on-top without unexpectedly popping or minimizing the window.
+  if (isPreferenceChange || stickyMode !== 'on_question') {
+    return {
+      setAlwaysOnTop: nextOnTop,
+      windowAction: 'none',
+      nextAutoReturn: null,
+    };
+  }
+
+  // Alert arrived (false -> true) under 'on_question' mode.
+  // Check isMinimized before !isVisible because on Windows Electron reports
+  // isVisible() === false while a window is minimized to the taskbar.
+  if (nextOnTop) {
+    if (windowState.isMinimized) {
+      return {
+        setAlwaysOnTop: true,
+        windowAction: 'restore_inactive',
+        nextAutoReturn: 'minimize',
+      };
+    }
+    if (!windowState.isVisible) {
+      return {
+        setAlwaysOnTop: true,
+        windowAction: 'show_inactive',
+        nextAutoReturn: 'hide',
+      };
+    }
+    if (!windowState.isFocused) {
+      return {
+        setAlwaysOnTop: true,
+        windowAction: 'move_top',
+        nextAutoReturn: 'minimize',
+      };
+    }
+    return {
+      setAlwaysOnTop: true,
+      windowAction: 'none',
+      nextAutoReturn: null,
+    };
+  }
+
+  // All alerts cleared (true -> false) under 'on_question' mode.
+  if (prevAutoReturn === 'hide') {
+    return {
+      setAlwaysOnTop: false,
+      windowAction: windowState.isVisible ? 'hide' : 'none',
+      nextAutoReturn: null,
+    };
+  }
+  if (prevAutoReturn === 'minimize') {
+    return {
+      setAlwaysOnTop: false,
+      windowAction: windowState.isVisible && !windowState.isMinimized ? 'minimize' : 'none',
+      nextAutoReturn: null,
+    };
+  }
+  return {
+    setAlwaysOnTop: false,
+    windowAction: 'none',
+    nextAutoReturn: null,
+  };
 }
 
 export function getQuestionWaitMs(item: ConversationItem, nowMs: number): number | null {
